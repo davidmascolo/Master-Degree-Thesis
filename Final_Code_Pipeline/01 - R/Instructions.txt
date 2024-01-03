@@ -1,5 +1,0 @@
-## Guide for Scripts
-
-The following two scripts must be run in pipeline without to clean the memory of the environment.
-0) 00_Data_Preparation.Rmd
-1) 01_DEG_Analysis.Rmd
