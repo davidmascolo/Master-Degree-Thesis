@@ -3,6 +3,6 @@ This repository contains the code and other useful resources for the thesis work
 
 Directories:
 - **Code**: code splitted into *Python* and *R*
-- **Latex**: main thesis in .pdf format and folder with images
+- **Latex**: main thesis in *.pdf* format and folder with images
 - **Papers**: reference papers
-- **Slides**: final presentaion in .ppt format and .pdf format
+- **Slides**: final presentaion in *.ppt* format and *.pdf* format
