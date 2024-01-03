@@ -1,0 +1,560 @@
+---
+title: "Similarity Network Fusion (SNF) - DEGs Genes, All Data"
+author: "Davide Mascolo"
+date: "2023-09-06"
+output: html_document
+---
+
+## Utils
+
+```{r setup, include = FALSE}
+library(tidyverse)
+library(SNFtool)
+library(e1071)
+library(ggplot2)
+library(readxl)
+library(flexclust)
+library(glue)
+library(igraph)
+library(gplots)
+library(caret)
+library(stats)
+library(ggsurvfit)
+library(survival)
+```
+
+## Custom Functions
+
+```{r}
+## Create a function that returns the string in correct form
+clean_patient <- function(patients_list){
+  ## Input: list of patients code to format
+  ## Output: code formatted
+  return(gsub("\\.", "-", patients_list))
+}
+
+optimal_cluster <- function(affinity_matrix, C, label){
+  ## Create an empty lists to save NMI values
+  NMI_values     <- list()
+  ## Define an empty dataframe where to collect the final result
+  df_cluster <- data.frame(K = c(C),
+                           NMI = rep(0, length(C))) 
+  ## Compute clustering
+  for (i in C){
+    cluster    <- spectralClustering(affinity_matrix, K = i)
+    ## Plot
+    displayClustersWithHeatmap(affinity_matrix, cluster,
+                               main = glue("Clustering with K = {i}"))
+    NMI_values <- append(NMI_values, calNMI(cluster, label))}
+  df_cluster$NMI <- NMI_values
+  return(df_cluster)
+}
+
+## Use a function to test enrichment clusters
+enrichment <- function(x, m, n, k, alpha){
+if (phyper(x[[1]], m[[1]], n[[1]], k[[1]], lower.tail = F) <= alpha){
+  print("Significant Enrichment")
+} else{
+  print("Not Significant Enrichment")
+}}
+```
+
+## Load Data
+
+```{r}
+## Set path
+path <- getwd()
+
+## Load Data
+
+## Rna Gene Counts 
+df_rna_counts <- read.csv(paste0(path, "/Data/rna_counts.csv"))
+
+## Exome  
+df_wes <- read.csv(paste0(path, "/Data/Exome_Genes.csv"))
+
+## Load DEGs genes
+df_degs <- read.csv(paste0(path, "/Data/diff_expressed_genes.csv"))
+df_degs <- df_degs$hgnc_symbol
+
+## Load 10% Differential Co-Expressed
+df_10_hubs <- c("GAS7", "ANO2", "EYA2", "MOV10L1", "ADCYAP1R1",
+                "AURKA", "EBF4", "GZMH", "SYNDIG1", "MEOX2",
+                "CDH23", "HLF", "GPRC5D", "PCDHB6", "CCN2",
+                "PCDHB10", "PCDHB12", "TMEM156", "MOCS1", "KCNK17",
+                "KLRD1", "ADGRB3", "SMAD6", "FRAS1", "PTPRQ", "ARMH4",
+                "CDH13", "ASXL3", "CCN1", "FLG2", "FLG", "NT5DC4",
+                "LRTM1", "SHC3", "HMCN2", "FAM13C", "GGTLC1", "HSPB8",
+                "TCF7L1", "C4orf19", "EPHB1", "C2CD6", "AFF2",
+                "H2BC5", "LRRC36", "CILP2", "CD3G", "CADPS", "SPRY1",
+                "C8orf48", "RET", "TUB", "SLC26A5", "ID4", "SYNPO2",
+                "BNC2", "ADCY5", "NPAS4", "SLC66A1L", "LPL", "ZNF683",
+                "PCDHB9", "TIGIT", "IZUMO1", "KCNB2", "FAM110C",
+                "ROBO2", "PBX1", "RTN4RL1", "MAGI2", "RELN", "H2BC26",
+                "DACT3", "DCHS2", "MT1F", "GRIN3A", "GJC2", "PKHD1L1",
+                "MT1H", "C2CD4B", "DOK6", "PLXNA4", "UPK3B", "PTCHD4",
+                "FAM72C", "FXYD1", "H2BC8", "H2AC14", "H2BC7")
+
+## Clinical
+df_clinical <- read_excel(paste0(path, "/Data/SU2C-MARK_Supplementary_Tables_Combined_v5_Filtered.xlsx"),
+                         sheet = "Table_S1_Clinical_Annotations",
+                         skip = 2)
+
+## Immune Signatures
+df_immune <- read_excel(paste0(path, "/Data/SU2C-MARK_Supplementary_Tables_Combined_v5_Filtered.xlsx"),
+                         sheet = "Table_S18_Immune_Signatures")
+
+## Myeloid Signatures
+df_myeloid <- read_excel(paste0(path, "/Data/SU2C-MARK_Supplementary_Tables_Combined_v5_Filtered.xlsx"),
+                         sheet = "Table_S19_Myeloid_Signatures")
+
+## Curated Signatures
+df_curated <- read_excel(paste0(path, "/Data/SU2C-MARK_Supplementary_Tables_Combined_v5_Filtered.xlsx"),
+                         sheet = "Table_S20_Curated_Signatures")
+
+
+## Some pre-processing
+
+## Rna Gene Counts
+df_rna_counts$Name        <- NULL
+gene_names                <- df_rna_counts$Description
+df_rna_counts$Description <- NULL
+colnames(df_rna_counts)   <- clean_patient(colnames(df_rna_counts))
+df_rna_counts             <- data.frame(t(df_rna_counts))
+colnames(df_rna_counts)   <- gene_names
+
+## Exome
+wes_patients     <- df_wes$Tumor_Sample_Barcode
+rownames(df_wes) <- clean_patient(wes_patients)
+df_wes           <- df_wes[,-2]
+df_wes$X         <- NULL
+
+## Clinical data
+df_clinical$Harmonized_SU2C_Participant_ID_v2 <- paste(
+  df_clinical$Harmonized_SU2C_Participant_ID_v2, "T1", sep = "-")
+
+## Immune
+immune_patients <- df_immune$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2
+df_immune$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2 <- NULL
+rownames(df_immune) <- immune_patients
+
+## Myeloid
+myeloid_patients <- df_myeloid$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2
+df_myeloid$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2 <- NULL
+rownames(df_myeloid) <- myeloid_patients
+
+## Curated
+curated_patients <- df_curated$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2
+df_curated$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2 <- NULL
+rownames(df_curated) <- curated_patients
+```
+
+## Data Wrangling
+
+```{r}
+## Check
+dim(df_rna_counts);dim(df_wes);dim(df_immune);dim(df_myeloid);dim(df_curated)
+```
+
+```{r}
+## At this point, is possible to filter the patients of WES data using the patients that are in RNA-Seq data.
+
+## Number of patients in common: 65
+common_patients <- Reduce(intersect, list(rownames(df_rna_counts),
+                                          rownames(df_wes),
+                                          rownames(df_curated),
+                                          rownames(df_myeloid),
+                                          rownames(df_curated)))
+                             
+
+## Filter the dataframe with two different sets of patients
+## Rna Counts
+df_rna_counts_final <- df_rna_counts[rownames(df_rna_counts) %in%
+                                       common_patients,
+                                     colnames(df_rna_counts) %in%
+                                       df_10_hubs]
+dim(df_rna_counts_final)
+## Dim: 65 patients x 57523 genes
+
+## Wes
+df_wes_final        <- df_wes[rownames(df_wes)
+                              %in% common_patients,
+                              colnames(df_wes) %in%
+                                df_10_hubs]
+dim(df_wes_final)
+## Dim: 65 patients x 16270 genes
+
+## Immune
+df_immune_final     <- df_immune[rownames(df_immune)
+                                 %in% common_patients, ]
+dim(df_immune_final);View(df_immune_final)
+
+## Myeloid
+df_myeloid_final        <- df_myeloid[rownames(df_myeloid)
+                              %in% common_patients,]
+dim(df_myeloid_final);View(df_myeloid_final)
+
+## Curated
+df_curated_final        <- df_curated[rownames(df_curated)
+                              %in% common_patients,]
+dim(df_curated_final);View(df_curated_final)
+
+## Extract true label
+## RNA
+df_clinical_filter <- df_clinical %>% 
+  select(Harmonized_SU2C_Participant_ID_v2,
+         Harmonized_Confirmed_BOR,
+         Patient_Age_at_Diagnosis, Patient_Sex,
+         Harmonized_PFS_Event, Harmonized_PFS_Days,
+         Harmonized_OS_Event, Harmonized_OS_Days,
+         Harmonized_Confirmed_BOR, Initial_Stage,
+         Patient_Race, Patient_Smoking_Status,
+         Histology_Harmonized, Line_of_Therapy,
+         Agent_PD1_Category,
+         Patient_Smoking_Status) %>% 
+  filter(Harmonized_SU2C_Participant_ID_v2 %in% common_patients)
+true_label <- df_clinical_filter$Harmonized_Confirmed_BOR
+true_label_smoking <- df_clinical_filter$Patient_Smoking_Status 
+
+## Format
+true_label <- case_when(true_label == "PR" ~ 1,
+                        true_label == "PD" ~ 2,
+                        true_label == "SD" ~ 2,
+                        TRUE ~ 1)
+```
+
+```{r}
+## Check
+dim(df_rna_counts_final);dim(df_wes_final);dim(df_immune_final);dim(df_curated_final);dim(df_myeloid_final)
+```
+
+## SNF
+
+### Compute distances
+
+In this chunk is possible to compute matrices for both datasets. Here we use the default euclidean distance for RNA-Seq data and the hamming distance for WES data.
+
+```{r}
+## Scaling
+## RNA-Seq
+df_rna_counts_scaled <- standardNormalization(df_rna_counts_final)
+## Immune
+df_immune_scaled     <- standardNormalization(df_immune_final)
+## Curated
+df_curated_scaled    <- standardNormalization(df_curated_final)
+## Myeloid
+df_myeloid_scaled    <- standardNormalization(df_myeloid_final)
+## WES
+df_wes_scaled        <- df_wes_final  
+
+## Compute distances
+## RNA-Seq
+dist_rna_counts     <- (dist2(as.matrix(df_rna_counts_scaled),
+                           as.matrix(df_rna_counts_scaled)))^(1/2)
+## Immune
+dist_immune  <- (dist2(as.matrix(df_immune_scaled),
+                           as.matrix(df_immune_scaled)))^(1/2)
+## Curated
+dist_curated <- (dist2(as.matrix(df_curated_scaled),
+                           as.matrix(df_curated_scaled)))^(1/2)
+## Myeloid
+dist_myeloid <- (dist2(as.matrix(df_myeloid_scaled),
+                           as.matrix(df_myeloid_scaled)))^(1/2)
+## WES
+dist_wes            <- (dist2(as.matrix(df_wes_scaled),
+                              as.matrix(df_wes_scaled),
+                              method = "binary"))^(1/2)
+```
+
+```{r}
+## Check
+dim(dist_rna_counts)[1] == dim(df_rna_counts_scaled)[1]
+dim(dist_immune)[1] == dim(df_immune_scaled)[1]
+dim(dist_curated)[1] == dim(df_curated_scaled)[1]
+dim(dist_myeloid)[1] == dim(df_myeloid_scaled)[1]
+dim(dist_wes)[1]        == dim(df_wes_scaled)[1]
+```
+
+### Affinity Matrix
+
+To convert distance matricies to similarity matricies, is possible to use affinityMatrix, which takes three arguments: - distance matrix - k: the number of neighbours, where affinities outsied of the neighbourhouud are set to zero (10\~30) - sigma: is the hyperparameter for the scaled exponential similarity kernel used to conduct the acual affinity calculation. Both of these parameters are chosen empirically. (0.3\~0.8) - T: number of iterations. (10\~30)
+
+```{r}
+## Parameters
+C <- 2
+K <- 15
+t <- 30
+alpha <- 0.8
+```
+
+```{r}
+## Affinity Matrix
+W_1 <- affinityMatrix(dist_rna_counts, K = K, sigma = alpha)
+W_2 <- affinityMatrix(dist_immune, K = K, sigma = alpha)
+W_3 <- affinityMatrix(dist_curated, K = K, sigma = alpha)
+W_4 <- affinityMatrix(dist_myeloid, K = K, sigma = alpha)
+W_5 <- affinityMatrix(dist_wes, K = K, sigma = alpha)
+```
+
+### Spectral Clustering
+```{r}
+## Clustering
+cluster_rna_counts <- optimal_cluster(W_1, C, true_label)
+cluster_immune     <- optimal_cluster(W_2, C, true_label)
+cluster_curated    <- optimal_cluster(W_3, C, true_label)
+cluster_myeloid    <- optimal_cluster(W_4, C, true_label)
+cluster_wes        <- optimal_cluster(W_5, C, true_label)
+
+## Spectral Clustering
+cluster_rna_counts_final <- spectralClustering(W_1, K = C)
+cluster_immune_final     <- spectralClustering(W_2, K = C)
+cluster_curated_final    <- spectralClustering(W_3, K = C)
+cluster_myeloid_final    <- spectralClustering(W_4, K = C)
+cluster_wes_final        <- spectralClustering(W_5, K = C)
+```
+
+```{r}
+## Save the patients for each community
+## RNA-Seq
+communities_rna <- data.frame(ID_Patient = c(common_patients),
+                  Community = c(cluster_rna_counts_final),
+                  Response = c(true_label),
+                  Sex = df_clinical_filter$Patient_Sex,
+                  Time = df_clinical_filter$Harmonized_OS_Days,
+    Smoking_Status = df_clinical_filter$Patient_Smoking_Status)
+## WES
+communities_wes <- data.frame(ID_Patient = c(common_patients),
+                   Community = c(cluster_wes_final),
+                   Response = c(true_label),
+                   Sex = df_clinical_filter$Patient_Sex,
+                   Time = df_clinical_filter$Harmonized_OS_Days,
+    Smoking_Status = df_clinical_filter$Patient_Smoking_Status)
+```
+
+### Fusion Network
+
+It's possible to see both matricies have some information about clusters in them.
+
+```{r}
+## Fusion algorithm
+W <- SNF(list(W_1, W_2, W_3, W_4, W_5), t, t)
+
+## Clustering with best C <- 3
+final_clusters <- spectralClustering(W, K = C)
+
+## Plot
+displayClustersWithHeatmap(W,
+              spectralClustering(W, K = C)) ## To analyze using clinical features (EDA)
+
+## Evaluate
+calNMI(final_clusters, true_label)
+```
+
+It's also possible to find the concordance between each individual network and the fused network
+
+```{r}
+## Concordance Matrix
+(concordance_matrix      <- concordanceNetworkNMI(list
+                                (W, W_1, W_2, W_3, W_4, W_5), C))
+## This output shows the concordance between the fused network and each individual network.
+```
+
+How many patients Response/Non-Response are in the different clusters?
+
+```{r}
+## Save the patients for each community
+communities <- data.frame(ID_Patient = c(common_patients),
+                          Community = c(final_clusters),
+                          Response = c(true_label),
+                  Sex = df_clinical_filter$Patient_Sex,
+                  Time = df_clinical_filter$Harmonized_OS_Days,
+        Smoking_Status = df_clinical_filter$Patient_Smoking_Status)
+## Remember: True_Label = 1 --> Response
+##           True_Label = 2 --> Resistance
+
+## Check
+dim(communities)
+```
+
+## Plot
+
+```{r}
+## Community
+ggplot(communities, aes(x = Community, y = after_stat(count))) +
+  geom_bar(color = "steelblue", fill = "steelblue") +
+  ggtitle(label = "Clusters Distribution",
+          subtitle = "for Similarity Network Fusion") +
+  ylab("N.") +
+  theme_grey()
+```
+
+We can conduct between-group significance tests using a log-rank test. The log-rank test equally weights observations over the entire follow-up time and is the most common way to compare survival times between groups.
+
+```{r}
+## Create dataframe for median probability
+
+
+## Difference wrt Community
+model_fit <- survdiff(Surv(Time, Response) ~ Community,
+                      data = communities)
+
+## Plot
+survfit2(Surv(Time, Response) ~ Community,
+         data = communities) %>% 
+  ggsurvfit(lwd = 1.3) +
+  labs(x = "Days", y = "Overall Survival Probability",
+       title = "Survival Plot") + ## basic plot
+  add_risktable()           + ## numbers at risk
+  add_legend_title("Community") +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+## Check
+model_fit
+```
+
+The following hypotheses are used in this test:
+
+$H_0$: There is no difference in survival between the groups.
+
+$H_1$: There is a difference in survival between the groups.
+
+With one degree of freedom, the Chi-Squared test statistic is 7.8, and the associated p-value is 0.005. We REJECT the null hypothesis because the p-value is smaller than 0.05 and also 0.01.
+
+```{r}
+## Check
+
+## Response
+communities %>% 
+  filter(Community == 1) %>% 
+  summarize(median_surv = median(na.omit(Time)))
+
+## Resistance
+communities %>% 
+  filter(Community == 2) %>% 
+  summarize(median_surv = median(na.omit(Time)))
+```
+
+The median survival time is:
+- 214 days for patients who are in Community 1
+- 470 days for patients who are in Community 2.
+
+## Enrichment Clusters Analysis (Hypergeometric Distribution)
+```{r}
+## Patients who are Response in different communities
+
+## Response
+resp_snf_comm_01 <- communities %>%
+  filter(Response == 1 & Community == 1) %>% 
+  count()
+resp_snf_comm_02 <- communities %>%
+  filter(Response == 1 & Community == 2) %>% 
+  count()
+## Resistance
+non_resp_snf_comm_01 <- communities %>%
+  filter(Response == 2 & Community == 1) %>% 
+  count()
+non_resp_snf_comm_02 <- communities %>%
+  filter(Response == 2 & Community == 2) %>% 
+  count()
+
+## Number of patients for each community
+n_comm_01_snf <- communities %>%
+  filter(Community == 1) %>% 
+  count()
+n_comm_02_snf <- communities %>%
+  filter(Community == 2) %>% 
+  count()
+
+## Successes in population
+succ_pop     <- length(true_label[true_label == 1])
+## Non-Successes in population
+non_succ_pop <- length(true_label[true_label == 2])
+```
+
+```{r}
+## How to use the function:
+## phyper(x/q, m, n, k)
+## x: number of successes in the samples
+## m: number of successes in the population
+## n: number of failures in the population
+## k: size of the sample or the number of trials
+
+## Probabilità di ottenere X o meno pazienti, con risposta all'immunoterapia sul totale della popolazione considerata.
+
+
+## Hypergeometric Distribution
+## lower.tail = F ---> P[X > x] (Scelta Effettuata)
+## lower.tail = T ---> P[X <= x] (Default)
+
+print("SNF Clusters:")
+## Community 01 - Response
+print("Community 01 Response:")
+enrichment(resp_snf_comm_01, succ_pop,
+       non_succ_pop, n_comm_01_snf, alpha = 0.05)
+## Community 02 - Response
+print("Community 02 Response:")
+enrichment(resp_snf_comm_02, succ_pop,
+           non_succ_pop, n_comm_02_snf,  alpha = 0.05)
+## Significativo
+## We can reject the null hypothesis and assume a significant enrichment, that is, there is a small probablity of seing an equal or bigger overlap than x.
+
+## Community 01 - Resistance (for resitance group, is important to consider the success such as non success)
+print("Community 01 Resistance:")
+enrichment(non_resp_snf_comm_01, non_succ_pop,
+           succ_pop, n_comm_01_snf, alpha = 0.05)
+## Significativo
+## We can reject the null hypothesis and assume a significant enrichment, that is, there is a small probablity of seing an equal or bigger overlap than x.
+## Community 02 - Resitance
+print("Community 02 Resistance:")
+enrichment(non_resp_snf_comm_02, non_succ_pop,
+           succ_pop, n_comm_02_snf, alpha = 0.05)
+```
+
+
+```{r}
+## For each cluster save the list of patients
+## Community 01
+community_01 <- communities %>% 
+  filter(Community == 1)
+## Community 02
+community_02 <- communities %>% 
+  filter(Community == 2)
+
+## Save
+write.csv(community_01, paste0(path, "/Clusters/community_01.csv"),
+          row.names = F)
+write.csv(community_02, paste0(path, "/Clusters/community_02.csv"),
+          row.names = F)
+```
+
+Use label propagation to predict the labels of new data points.
+```{r}
+## Predictions
+
+## Create training and test data
+n            <- floor(0.6 * length(true_label)) ## training samples
+train_sample <- sample.int(length(true_label), n) 
+x_train      <- lapply(W, function(x) W[train_sample, ])
+x_test       <- lapply(W, function(x) W[-train_sample, ])
+groups       <- true_label[train_sample]
+```
+
+```{r}
+## Parameters
+K      <- 15
+alpha  <- 0.8
+t      <- 30
+method <- T
+```
+
+```{r}
+## Apply prediction
+y_pred <- groupPredict(x_train, x_test, groups, K, alpha, method)
+```
+
+```{r}
+## Evaluate computing the accuracy
+(accuracy  <- sum(true_label[-train_sample] == y_pred[-c(1:n)])/
+   (length(true_label) - n))
+```

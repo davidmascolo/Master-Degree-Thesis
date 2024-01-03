@@ -1,0 +1,180 @@
+---
+title: "Data Preparation"
+author: "Davide Mascolo"
+date: "2023-05-26"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Utils and Setup
+```{r}
+set.seed(123)
+library(magrittr)
+library(data.table)
+library(tidyverse)
+library(readxl)
+library(dplyr)
+```
+
+## Load Data
+The following datasets are loaded: 1. Clinical Table Annotations 2. RNA Counts 3. RNA Log Counts
+```{r}
+## Load Directory
+source_data_path <- getwd()
+
+## Load Gene Names file
+load(paste0(source_data_path, "/gene_names.rds"))
+
+## Load Clinical Table Annotation
+master_annotations_df <- read_excel(paste0(source_data_path,
+                                           "/Table_S1_Clinical_Annotations.xlsx"),
+                                    sheet = "Table_S1_Clinical_Annotations",
+                                    skip = 2)
+
+## Load RNA Counts
+su2c_rna_counts_mat <-  read_delim(paste0(
+  source_data_path,"/SU2C-MARK_Supplementary_Table_12_RNA_Counts_v4.gct"),
+  skip = 2)
+## Set row names
+row.names(su2c_rna_counts_mat) <- su2c_rna_counts_mat$Name
+
+## Load log RNA Counts
+su2c_rna_log2tpm_mat <- read_delim(paste0(
+  source_data_path, "/SU2C-MARK_Supplementary_Table_14_RNA_TPM.gct"),
+  skip = 2)
+## Set row names
+row.names(su2c_rna_log2tpm_mat) <- su2c_rna_log2tpm_mat$Name
+```
+
+### Description of data
+```{r}
+## Check Clinical table
+dim(master_annotations_df)
+## Check RNA Counts
+dim(su2c_rna_counts_mat)
+## Check RNA Log Counts 
+dim(su2c_rna_log2tpm_mat)
+```
+
+### View
+```{r}
+## Clinical table
+View(master_annotations_df)
+## RNA Counts
+View(su2c_rna_counts_mat[1:20, 1:20])
+## RNA Log Counts
+View(su2c_rna_log2tpm_mat[1:20, 1:20])
+```
+
+## Data Wrangling
+
+For this part, we consider the feature **Pre-treatment_RNA_Sample_QC** that contains information about **Tumor RNA-Seq sample quality**. For the whole dataset, the number of patients is 393, but for the DEG analysis we consider only the patients with highest quality of RNA samples. So, the feature defined contains different NaN.
+
+```{r}
+## Check NaN
+table(is.na(master_annotations_df$`Pre-treatment_RNA_Sample_QC`))
+```
+
+We consider only the 152 observations that are divided in the following way:
+
+```{r}
+## Count the different levels of 152 obsevrations
+table(master_annotations_df$`Pre-treatment_RNA_Sample_QC`)
+```
+
+```{r}
+## Filter by QC
+rna_master_annotations_df <-
+  master_annotations_df[master_annotations_df$`Pre-treatment_RNA_Sample_QC` == "Keep" | master_annotations_df$`Pre-treatment_RNA_Sample_QC` == "Flag",]
+
+## Format 
+all_rna_samples <- as.character(na.omit(rna_master_annotations_df$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2) )
+
+## Select
+## N.B.: all_rna_samples is a list that contains all the patients with the
+## highest quality sample
+rna_counts_mat            <- su2c_rna_counts_mat[, all_rna_samples]
+row.names(rna_counts_mat) <- row.names(su2c_rna_counts_mat)
+## Check
+dim(rna_counts_mat)
+## Save
+write.csv(rna_counts_mat, row.names = TRUE,
+          paste0(source_data_path,
+                 "/rna_counts_mat.csv"))
+```
+
+The final table is organized in the following way:
+- for each row: gene
+- for each column: patient
+
+```{r}
+## View
+head(rna_counts_mat[1:10, 1:10])
+```
+
+The same operation is done also for RNA log Counts
+```{r}
+## Apply
+rna_log2tpm_mat            <- su2c_rna_log2tpm_mat[, all_rna_samples]
+row.names(rna_log2tpm_mat) <- row.names(su2c_rna_log2tpm_mat)
+rna_log2tpm_mat            <- log2(rna_log2tpm_mat + 1)
+## Check
+dim(rna_log2tpm_mat)
+## Save
+write.csv(rna_log2tpm_mat, row.names = FALSE,
+          paste0(source_data_path,
+                 "/rna_log2tpm_mat.csv"))
+```
+
+Now, we filter out the samples that have mixed small-cell histology
+```{r}
+## Training (RNA_Cohort_1 == 1)
+rna_training_samples <-
+  as.character(na.omit(
+    rna_master_annotations_df$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2[
+      rna_master_annotations_df$RNA_Cohort_1 == 1]))
+## 122 samples
+
+## Validation (RNA_Cohort_2 == 1)
+rna_validation_samples <-
+  as.character(na.omit(
+    rna_master_annotations_df$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2[
+      rna_master_annotations_df$RNA_Cohort_2 == 1]))
+## 30 samples
+
+## Set diff
+rna_training_samples     <- setdiff(rna_training_samples, c("SU2CLC-MGH-1151-T1"))
+training_rna_log2tpm_mat <- rna_log2tpm_mat[, rna_training_samples]
+row.names(training_rna_log2tpm_mat) <- row.names(rna_log2tpm_mat)
+## Save
+write.csv(training_rna_log2tpm_mat, row.names = FALSE,
+          paste0(source_data_path,
+                 "/training_rna_log2tpm_mat.csv"))
+```
+
+```{r}
+## Set aside validation + flagged input for BNMF
+
+## RNA Validation Samples is composed by:
+## samples with RNA_Cohort_2 == 1
+## samples with QC == Flag
+rna_validation_flag_samples <- union(
+  rna_validation_samples,
+  na.omit(rna_master_annotations_df$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2[
+    rna_master_annotations_df$`Pre-treatment_RNA_Sample_QC` == "Flag"]))
+
+## Log RNA Validation Samples
+validation_rna_log2tpm_mat <- rna_log2tpm_mat[,
+as.character(rna_validation_flag_samples)]
+validation_rna_log2tpm_df <- as.data.frame(validation_rna_log2tpm_mat) %>%
+  mutate(ensembl_gene_id_version = rownames(validation_rna_log2tpm_mat))
+validation_rna_log2tpm_df <- validation_rna_log2tpm_df[,c("ensembl_gene_id_version", rna_validation_flag_samples)]
+
+## Save
+write.csv(validation_rna_log2tpm_df, row.names = FALSE,
+          paste0(source_data_path,
+                 "/SU2C_validation+flag.classifier.input.csv"))
+```

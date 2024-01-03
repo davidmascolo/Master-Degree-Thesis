@@ -1,0 +1,685 @@
+---
+title: "Survival Analysis"
+author: "Davide Mascolo"
+date: "2023-07-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Import Utils
+```{r}
+## Libraries
+library(dplyr)
+library(tidyverse)
+library(survival)
+library(ggsurvfit)
+library(gtsummary)
+library(tidycmprsk)
+library(sm)
+library(zoo)
+library(condsurv)
+library(kableExtra)
+library(survminer)
+```
+
+### Load Data
+```{r}
+## Clinical Data
+df_annotation <- read.csv("master_annotation.csv",
+                          header = T)
+df_annotation$X <- NULL
+```
+
+```{r}
+## Check
+dim(df_annotation);View(df_annotation)
+```
+
+Features that we need:
+1. time: Observed survival times in days
+2. status: censoring status 1 = censored, 2 = dead
+3. sex: 1 = Male, 2 = Female
+4. response: 1 = Partial Response, 2 = Complete Response,
+             3 = Stable Disease, 4 = Progression Disease
+             
+NB:  Progression-free survival (PFS), the time from treatment initiation until disease progression or worsening, may be used as a direct or surrogate measure of clinical benefit for drug approvals, depending on the disease and response observed, while overall survival (OS), the duration of patient survival from the time of treatment initiation, is a universally-accepted direct measure of clinical benefit.
+
+### Data Wrangling
+```{r}
+## Select only some features
+df_annotation_part_1 <- df_annotation %>% 
+  select(Harmonized_SU2C_Participant_ID_v2,
+         Patient_Age_at_Diagnosis, Patient_Sex,
+         Harmonized_PFS_Event, Harmonized_PFS_Days,
+         Harmonized_OS_Event, Harmonized_OS_Days,
+         Harmonized_Confirmed_BOR, Initial_Stage,
+         Patient_Race, Patient_Smoking_Status,
+         Histology_Harmonized, Line_of_Therapy,
+         Agent_PD1_Category)
+
+## Create new column for response
+df_annotation_part_1 <- df_annotation_part_1 %>% 
+  mutate(Response = case_when(
+    Harmonized_Confirmed_BOR == "PR" ~ 1,
+    Harmonized_Confirmed_BOR == "CR" ~ 2,
+    Harmonized_Confirmed_BOR == "SD" ~ 3,
+    Harmonized_Confirmed_BOR == "PD" ~ 4,
+    TRUE ~ NA_integer_))
+```
+
+```{r}
+## Check
+dim(df_annotation_part_1);View(df_annotation_part_1)
+```
+```{r}
+## Mutate some features
+
+## Harmonized OS Event
+df_annotation_part_1$Harmonized_OS_Event <- ifelse(df_annotation_part_1$Harmonized_OS_Event == 0, 1, 2)
+
+## Patient Sex
+df_annotation_part_1$Patient_Sex <- ifelse(df_annotation_part_1$Patient_Sex == "M", 1, 2)
+```
+
+```{r}
+## Check
+table(df_annotation$Harmonized_OS_Event)
+table(df_annotation_part_1$Harmonized_OS_Event)
+
+## Check
+table(df_annotation$Patient_Sex)
+table(df_annotation_part_1$Patient_Sex)
+
+## Check
+table(df_annotation$Harmonized_Confirmed_BOR)
+table(df_annotation_part_1$Harmonized_Confirmed_BOR)
+```
+
+```{r}
+## Organize the final df
+
+## Rename time column
+colnames(df_annotation_part_1)[colnames(df_annotation_part_1) == "Harmonized_OS_Days"] <- "Time"
+
+## Rename status column
+colnames(df_annotation_part_1)[colnames(df_annotation_part_1) == "Harmonized_OS_Event"] <- "Status"
+
+## Rename Sex column
+colnames(df_annotation_part_1)[colnames(df_annotation_part_1) == "Patient_Sex"] <- "Sex"
+```
+
+```{r}
+## Select only the features of interest
+df_annotation_part_1_final <- df_annotation_part_1 %>% 
+  select(Time, Status, Sex, Response)
+## Check
+head(df_annotation_part_1_final)
+## Remove NaN
+df_annotation_part_1_final <- na.omit(df_annotation_part_1_final)
+```
+
+### Part 1 - Survival Analysis
+```{r}
+## Compute survival times
+head(Surv(df_annotation_part_1_final$Time,
+          df_annotation_part_1_final$Status), 10)
+```
+Patient 1 had an event at time 434 days, patient 2 had an event at time 86 days, patient 3 was censored at time 161 days, etc.
+
+```{r}
+## Compute survival curve with Kaplan-Meier method
+s1 <- survfit(Surv(Time , Status) ~ 1, data = df_annotation_part_1_final)
+str(s1)
+```
+Some key components of this object that will be used to create survival curves include:
+- time: the timepoints at which the curve has a step, i.e. at least one event occurred.
+- surv: the estimate of survival at the corresponding time.
+
+```{r}
+## Kaplan-Meier plots
+survfit2(Surv(Time, Status) ~ 1, data = df_annotation_part_1_final) %>% 
+  ggsurvfit(lwd = 1) +
+  labs(x = "Days", y = "Overall Survival Probability",
+       title = "Survival Plot") + ## basic plot
+  add_confidence_interval() + ## confidence interval
+  add_risktable()           + ## numbers at risk
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+
+One quantity of interest in a survival analysis is the probability of surviving beyond a certain number of years x. For example, to estimate the probability of surviving to 1 year, use summary function with the times argument. The variable Time is in days and we need to use time = 365.25
+```{r}
+## Estimating x-year survival
+fit <- survfit(Surv(Time, Status) ~ 1,
+               data = df_annotation_part_1_final)
+summary_fit <- summary(fit, times = 365.25)
+summary_fit
+```
+We find that the 1-year probability of survival in this study is 67.3%. The associated lower an upper bounds are of the 95% confidence interval are: 62.5% and 72.5%. The 1-year survival probability is the point on the y-axis that corresponds to 1 year on the x-axis for the survival curve.
+
+```{r}
+## Create df
+my_times <- c(365)
+df       <- data.frame(times = my_times,
+                       probs = summary_fit$surv) 
+
+## Let's see the 1-year probability
+survfit2(Surv(Time, Status) ~ 1, data = df_annotation_part_1_final) %>% 
+  ggsurvfit(lwd = 1) +
+  labs(x = "Days", y = "Overall Survival Probability",
+       title = "Survival Plot") + ## basic plot
+  add_confidence_interval() + ## confidence interval
+  add_risktable()           + ## numbers at risk
+  geom_segment(data = df,
+               aes(x = my_times, y = 0, xend = times, yend = probs),
+               linetype = "dashed", color = "red", lwd = 1)+ 
+  geom_segment(data = df,
+               aes(x = 0, y = probs, xend = times, yend = probs),
+               linetype = "dashed", color = "red", lwd = 1) +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+What happens if you use a “naive” estimate? Here “naive” means that the patients who were censored prior to 1-year are considered event-free and included in the denominator.
+
+121 of the 228 patients in the lung data died by 1
+ year so the “naive” estimate is calculated as:
+
+$(1−\frac{121}{228})\cdot100 = 47\%$
+
+You get an incorrect estimate of the 1
+-year probability of survival when you ignore the fact that 42 patients were censored before 1
+ year.
+
+Recall the correct estimate of the 1
+-year probability of survival, accounting for censoring using the Kaplan-Meier method, was 41%.
+
+Ignoring censoring leads to an overestimate of the overall survival probability. Imagine two studies, each with 228 subjects. There are 165 deaths in each study. Censoring is ignored in one (blue line), censoring is accounted for in the other (yellow line). The censored subjects only contribute information for a portion of the follow-up time, and then fall out of the risk set, thus pulling down the cumulative probability of survival. Ignoring censoring erroneously treats patients who are censored as part of the risk set for the entire follow-up period.
+
+
+```{r}
+## x-time survival probability estimate
+survfit(Surv(Time, Status) ~ 1, data = df_annotation_part_1_final) %>% 
+  tbl_survfit(
+    times = 365.25,
+    label_header = "**1-year survival (95% CI)**")
+```
+
+Another quantity of interest in a survival analysis is the average time, which we quantify using the median. Survival times are not expected to be normally distributed so the mean is not an appropriate summary.
+```{r}
+## Estimating median survival time
+fit
+```
+The median survival time is 640 days. The lower and upper bounds of the 95% confidence interval are: 547 days and 777 days.
+Median survival is the time corresponding to a survival probability of 0.5
+
+```{r}
+## Create df
+my_times <- c(636)
+df       <- data.frame(times = my_times,
+                       probs = 0.5) 
+
+## Let's see the 1-year probability
+survfit2(Surv(Time, Status) ~ 1, data = df_annotation_part_1_final) %>% 
+  ggsurvfit(lwd = 1) +
+  labs(x = "Days", y = "Overall Survival Probability",
+       title = "Survival Plot") + ## basic plot
+  add_confidence_interval() + ## confidence interval
+  add_risktable()           + ## numbers at risk
+  geom_segment(data = df,
+               aes(x = my_times, y = 0, xend = times, yend = probs),
+               linetype = "dashed", color = "red", lwd = 1)+ 
+  geom_segment(data = df,
+               aes(x = 0, y = probs, xend = times, yend = probs),
+               linetype = "dashed", color = "red", lwd = 1) +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+What happens if we yse a "naive" estimate? Here "naive" means that we exclude the censored patients from the calculation entirely to estimate median survival time among the patients who have had the event.
+Summarize the median survival time among the patients who died.
+```{r}
+## Compute
+df_annotation_part_1_final %>% 
+  filter(Status == 1) %>% 
+  summarize(median_surv = median(Time))
+```
+We get an incorrect estimate of median survival time of 570 days when we ignore the fact that the censored patients also contribute follow-up time. The correct estimate of median survival time is 636 days.
+
+Ignoring censoring will lead to an underestimate of median survival time because the follow-up time that censored patients contribute is excluded (blue line). The true survival curve accounting for censoring is the yellow one.
+```{r}
+## Median survival time
+survfit(Surv(Time, Status) ~ 1, data = df_annotation_part_1_final) %>% 
+  tbl_survfit(
+    probs = 0.5,
+    label_header = "**Median survival (95% CI)**")
+```
+
+
+We can conduct between-group significance tests using a log-rank test. The log-rank test equally weights observations over the entire follow-up time and is the most common way to compare survival times between groups.
+```{r}
+## Difference wrt Sex
+fit_sex <- survdiff(Surv(Time, Status) ~ Sex,
+                    data = df_annotation_part_1_final)
+
+## Plot
+survfit2(Surv(Time, Status) ~ Sex,
+         data = df_annotation_part_1_final) %>% 
+  ggsurvfit(lwd = 1) +
+  labs(x = "Days", y = "Overall Survival Probability",
+       title = "Survival Plot") + ## basic plot
+  add_confidence_interval() + ## confidence interval
+  add_risktable()           + ## numbers at risk
+  add_legend_title("Sex") +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+We see that there was not a significant difference in overall survival according to sex in this study, with a p-value of p = 0.5
+
+```{r}
+## Difference wrt Response or Not
+fit_response <- survdiff(Surv(Time, Status) ~ Response,
+                         data = df_annotation_part_1_final)
+
+## Plot
+survfit2(Surv(Time, Status) ~ Response,
+         data = df_annotation_part_1_final) %>% 
+  ggsurvfit(lwd = 1) +
+  labs(x = "Days", y = "Overall Survival Probability",
+       title = "Survival Plot") + ## basic plot
+  add_confidence_interval() + ## confidence interval
+  add_risktable()           + ## numbers at risk
+  add_legend_title("Response") +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+We see that there was a significant difference in overall survival according to response of immunotherapy in this study,
+with a p-value of p <2e-16.
+
+We can obtain tables of results with the option to return the hazard ration rather than the log hazard ratio.
+```{r}
+## Compute
+coxph(Surv(Time, Status) ~ Sex,
+      data = df_annotation_part_1_final) %>% 
+  tbl_regression(exp = TRUE) 
+```
+
+The quantity of interest from a Cox regression model is a hazard ratio (HR). The HR represents the ratio of hazards between two groups at any particular point in time. The HR is interpreted as the instantaneous rate of occurrence of the event of interest in those who are still at risk for the event. It is not a risk, through it is commonly mis-interpreted as such. A HR < 1, indicated reduced hazard of death whereas a HR > 1 indicates an increased hazard of death.
+So the HR of 0.91 implies that 0.91 times as many females are dying as males, at any given time. Stated differently, females have a significantly lower hazard of death than males in these data.
+
+### Part 2 - Landmark Analysis and Time Dependent Covariates
+In Part 1 we covered using log-rank tests and Cox regression to examine associations between covariates of interest and survival outcomes. But these analyses rely on the covariate being measured at baseline, that is, before follow-up time for the event begins. What happens if you are interested in a covariate that is measured after follow-up time begins?
+
+Example: Overall survival is measured from treatment start, and interest is in the association between complete response to treatment and survival.
+
+Anderson et al (JCO, 1983) described why traditional methods such as log-rank tests or Cox regression are biased in favor of responders in this scenario, and proposed the landmark approach. The null hypothesis in the landmark approach is that survival from landmark does not depend on response status at landmark.
+
+Some other possible covariates of interest in cancer research that may not be measured at baseline include:
+
+- transplant failure
+- graft versus host disease
+- second resection
+- adjuvant therapy
+- compliance
+- adverse events
+
+Variables of interest include:
+1. time_01: Observed survival times in days
+2. time_02: Progression-free survival (PFS) times in days
+2. status: censoring status 1 = censored, 2 = dead
+3. sex: 1 = Male, 2 = Female
+4. response: 1 = Partial Response, 2 = Complete Response,
+             3 = Stable Disease, 4 = Progression Disease
+5. stage: stage of the disease
+
+```{r}
+## Check
+colnames(df_annotation_part_1)
+```
+
+Approach:
+1. Select a fixed time after baseline as your landmark time. Note: this should be done based on clinical information, prior to data inspection
+
+2. Subset population for those followed at least until landmark time. Note: always report the number excluded due to the event of interest or censoring prior to the landmark time.
+
+3. Calculate follow-up from landmark time and apply traditional log-rank tests or Cox regression.
+
+1. Landmark Time
+[Reference](https://jamanetwork.com/journals/jamaoncology/fullarticle/2805798) ---> Landmark Time: 1 year
+
+2. Subset population for those followed at least until landmark time
+```{r}
+## Subset
+df_annotation_part_2 <- 
+  df_annotation_part_1 %>% 
+  filter(Time >= 365*2) 
+
+message("Initial Patients: ")
+dim(df_annotation_part_1)[1]
+message("\n")
+
+message("Current Patients: ")
+dim(df_annotation_part_2)[1]
+message("\n")
+
+message("Patients Excluded: ")
+dim(df_annotation_part_1)[1]-dim(df_annotation_part_2)[1]
+```
+
+3. Calculate follow-up time from landmark and apply traditional methods.
+```{r}
+## Compute
+df_annotation_part_2 <- 
+  df_annotation_part_2 %>% 
+  mutate(LM_Time = Time - 365*2)
+```
+
+```{r}
+## Plot
+survfit2(Surv(LM_Time, Status) ~ Initial_Stage,
+         data = df_annotation_part_2) %>% 
+  ggsurvfit(lwd = 1) +
+  labs(
+    x = "Days from 2-years landmark",
+    y = "Overall survival probability", title = "Survival Plot") +
+  add_risktable() +
+  add_legend_title("Tumor Stage") +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+
+### Part 3 - Competing Risks
+Competing risks analyses may be used when subjects have multiple possible events in a time-to-event setting.
+
+Examples:
+
+- recurrence
+- death from disease
+- death from other causes
+- treatment response
+All or some of these (among others) may be possible events in any given study. The fundamental problem that may lead to the need for specialized statistical methods is unobserved dependence among the various event times. For example, one can imagine that patients who recur are more likely to die, and therefore times to recurrence and times to death would not be independent events.
+
+There are two approaches to analysis in the presence of multiple potential outcomes:
+
+- Cause-specific hazard of a given event: this represents the rate per unit of time of the event among those not having failed from other events
+
+- Subdistribution hazard of a given event: this represents the rate per unit of time of the event as well as the influence of competing events
+Each of these approaches may only illuminate one important aspect of the data while possibly obscuring others, and the chosen approach should depend on the question of interest.
+
+When the events are independent (almost never true), cause-specific hazards is unbiased. When the events are dependent, a variety of results can be obtained depending on the setting. Cumulative incidence using 1 minus the Kaplan-Meier estimate is always >= cumulative incidence using competing risks methods, so can only lead to an overestimate of the cumulative incidence, though the amount of overestimation depends on event rates and dependence among events.
+To establish that a covariate is indeed acting on the event of interest, cause-specific hazards may be preferred for treatment or prognostic marker effect testing. To establish overall benefit, subdistribution hazards may be preferred for building prognostic nomograms or considering health economic effects to get a better sense of the influence of treatment and other covariates on an absolute scale.
+
+```{r}
+## Check data
+colnames(df_annotation_part_2)
+```
+```{r}
+## Format data
+df_annotation_part_3 <- df_annotation_part_2
+
+## Age
+df_annotation_part_3$Age <- as.integer(df_annotation_part_2$Patient_Age_at_Diagnosis)
+
+## Histology Harmomnized
+df_annotation_part_3 <- df_annotation_part_3 %>% 
+  mutate(Tumor_Type = case_when(
+    Histology_Harmonized == "Adeno" ~ 1,
+    Histology_Harmonized == "LC-NE" ~ 2,
+    Histology_Harmonized == "Squamous" ~ 3,
+    TRUE ~ 4))
+
+## Agent PD1 Category
+df_annotation_part_3 <- df_annotation_part_3 %>% 
+  mutate(Agent_PD1 = case_when(
+    Agent_PD1_Category == "PD(L)1" ~ 1,
+    Agent_PD1_Category == "PD(L)1 + CTLA4" ~ 2,
+    TRUE ~ 4))
+```
+
+```{r}
+## Check
+str(df_annotation_part_3)
+```
+
+Cumulative Incidence for competing risks
+```{r}
+## Compute
+cuminc(Surv(Time, factor(Status)) ~ 1, data = df_annotation_part_3)
+```
+
+```{r}
+## Plot Cumulative Incidence
+cuminc(Surv(Time, factor(Status)) ~ 1, data = df_annotation_part_3) %>% 
+  ggcuminc(lwd = 1) + 
+  labs(x = "Days") + 
+  add_confidence_interval() +
+  add_risktable()
+```
+
+```{r}
+## Incidence of disease wrt sex
+cuminc(Surv(Time, factor(Status)) ~ Sex,
+            data = df_annotation_part_3) %>% 
+  tbl_cuminc(times = 1826.25, 
+    label_header = "**{time/365.25}-year cuminc**") %>% 
+  add_p()
+
+## Smoking Status
+cuminc(Surv(Time, factor(Status)) ~ Patient_Smoking_Status,
+            data = df_annotation_part_3) %>% 
+  tbl_cuminc(times = 1826.25, 
+    label_header = "**{time/365.25}-year cuminc**") %>% 
+  add_p()
+
+## Line of Therapy
+cuminc(Surv(Time, factor(Status)) ~ Line_of_Therapy,
+            data = df_annotation_part_3) %>% 
+  tbl_cuminc(times = 1826.25, 
+    label_header = "**{time/365.25}-year cuminc**") %>% 
+  add_p()
+
+## Age
+cuminc(Surv(Time, factor(Status)) ~ Age,
+            data = df_annotation_part_3) %>% 
+  tbl_cuminc(times = 1826.25, 
+    label_header = "**{time/365.25}-year cuminc**") %>% 
+  add_p()
+
+## Patient Race Type
+cuminc(Surv(Time, factor(Status)) ~ Patient_Race,
+            data = df_annotation_part_3) %>% 
+  tbl_cuminc(times = 1826.25, 
+    label_header = "**{time/365.25}-year cuminc**") %>% 
+  add_p()
+```
+
+```{r}
+## Plots
+
+## Sex
+cuminc(Surv(Time, factor(Status)) ~ Sex,
+       data = df_annotation_part_3) %>% 
+  ggcuminc() + 
+  labs(x = "Days") + 
+  add_confidence_interval() +
+  add_risktable() +
+  add_legend_title("Sex") +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+## Initial Stage
+cuminc(Surv(Time, factor(Status)) ~ Initial_Stage,
+       data = df_annotation_part_3) %>% 
+  ggcuminc() + 
+  labs(x = "Days") + 
+  add_confidence_interval() +
+  add_risktable() +
+  add_legend_title("Initial Stage") +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+## Line of Therapy
+cuminc(Surv(Time, factor(Status)) ~ Line_of_Therapy,
+       data = df_annotation_part_3) %>% 
+  ggcuminc() + 
+  labs(x = "Days") + 
+  add_confidence_interval() +
+  add_risktable() +
+  add_legend_title("Line of Therapy") +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+## Response
+cuminc(Surv(Time, factor(Status)) ~ Response,
+       data = df_annotation_part_3) %>% 
+  ggcuminc(lwd = 1) + 
+  labs(x = "Days") + 
+  add_risktable() +
+  add_legend_title("Response") +
+  theme_gray() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+Competiting Risk Regression
+```{r}
+## Model
+crr(Surv(Time, factor(Status)) ~ Sex + Age + Response + Initial_Stage +
+      Patient_Smoking_Status + Line_of_Therapy + Agent_PD1 +
+      Patient_Race + Tumor_Type, data = df_annotation_part_3)
+```
+```{r}
+## Check
+crr(Surv(Time, factor(Status)) ~ Sex + Age + Response + Initial_Stage +
+      Patient_Smoking_Status + Line_of_Therapy + Agent_PD1 +
+      Patient_Race + Tumor_Type, data = df_annotation_part_3) %>% 
+  tbl_regression(exp = TRUE)
+```
+
+Relevant factors:
+- Age, Response, Patient Smoking Status, Line of therapy, Agent PD1, Patient Race.
+
+### Part 4 - Advanced Topics
+In this section I’ll include a variety of bits and pieces of things that may come up and be handy to know:
+
+- Assessing the proportional hazards assumption
+- Making a smooth survival plot based on x-year survival according to a continuous covariate
+- Conditional survival
+
+```{r}
+## Collect data
+df_annotation_part_4 <- df_annotation_part_3 
+```
+
+Assessing proportional hazards
+```{r}
+## Cox proportional hazards regression model
+mv_fit <- coxph(Surv(Time, Status) ~ Sex + Age + Response +
+                       Initial_Stage + Patient_Smoking_Status +
+                       Line_of_Therapy + Agent_PD1 +
+                       Patient_Race + Tumor_Type,
+                     data = df_annotation_part_4)
+```
+
+```{r}
+## Analysis
+mv_fit
+```
+
+```{r}
+## Summary
+summary(mv_fit)
+```
+
+```{r}
+## Analysis
+cz     <- cox.zph(mv_fit)
+print(cz)
+```
+
+```{r}
+## Plot
+ggcoxzph(cz)
+```
+
+Here we see that with p-values > 0.05, we do not reject the null hypothesis, and conclude that the proportional hazards assumption is satisfied for each individual covariate, and also for the model overall.
+
+Smooth Survival Plot
+```{r}
+## Smooth Survival
+sm.options(list(xlab = "Age (Years)",
+                ylab = "Median time to death (Years)"))
+
+## Format Age
+df_annotation_part_4$Age <- na.aggregate(df_annotation_part_4$Age,
+                                         FUN = median)
+
+## Plot
+ggcoxdiagnostics(mv_fit, type = "schoenfeld",
+                 hline.size = 1.2,
+                 sline.size = 1.2,
+                 title = "Residual Plot",
+                 subtitle = "using Scaled Schoenfeld") +
+  geom_smooth()
+```
+
+- The x's represent events
+- The o's represent censoring
+- The line is a smoothed estimate of median survival according to age. (In this case too smooth)
+
+The option h is the smoothing parameter. This should be related to the standard deviation of the continuous covariate, x. Suggested to start eith $\frac{sd(x)}{n^\frac{-1}{4}}$ then reduce by $\frac{1}{2}$, $\frac{1}{4}$, etc. to get a good amount of smoothing. The previous plot was too smooth so let's reduce it by $\frac{1}{6}$.
+```{r}
+## Plot
+ggcoxdiagnostics(mv_fit, type = "deviance",
+                 hline.size = 1.5,
+                 sline.size = 1.5,
+                 point.size = 2,
+                 title = "Deviance Plot",
+                 linear.predictions = FALSE, ggtheme = theme_bw())
+```
+
+Now we can see that the median time to death increase slightly as age is between 55 and 65, and increase slightly again when age is above 78.
+
+
+Conditional Survival
+Sometimes it is of interest to generate survival estimates among a group of patients who have already survived for some length of time.
+$$S(y|x) = \frac{S(x + y)}{S(x)}$$
+- y: number of additional survival years of interest
+- x: number of years a patient has already survived
+
+Let's condition on survival to 6-months.
+```{r}
+## Fit
+fit_cond <- survfit(Surv(Time, Status) ~ 1,
+                     data = na.omit(df_annotation_part_4))
+```
+
+```{r}
+## Condition on survival to 6-months
+prob_times <- c(365.25)
+```
+
+```{r}
+## Plot
+purrr::map_df(prob_times, ~conditional_surv_est(basekm = fit_cond,
+                                                t1 = prob_times,
+                                                t2 = .x)) %>% 
+  mutate(months = round(prob_times / 30.4)) %>% 
+  select(months, everything())
+```
+
+```{r}
+## Plot
+gg_conditional_surv(basekm = fit_cond, at = prob_times,
+                    main = "Conditional survival in NSCLC data",
+                    xlab = "Days") +
+  labs(color = "Time")
+```
+
+
