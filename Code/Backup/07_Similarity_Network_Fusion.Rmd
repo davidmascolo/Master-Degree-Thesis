@@ -1,0 +1,110 @@
+---
+title: "Similarity Network Fusion"
+author: "Davide Mascolo"
+date: "2023-08-23"
+output: html_document
+---
+
+### Utils
+```{r}
+library(SpatialTools)
+library(SNFtool)
+```
+
+```{r}
+## Set directory for data
+dir_data <- "C:/Users/david/Documents/Università/Magistrale/Tesi/Code/Personal_Code/Similarity_Network_Fusion/Data/"
+```
+
+
+### Load Data
+```{r}
+## RNA-Seq Data
+df_rna <- read.csv(paste(dir_data, "df_final_rna_snf.csv",
+                         sep = "/"), header = T)
+## WES Data
+df_wes <- read.csv(paste(dir_data, "df_final_wes_snf.csv",
+                         sep = "/"), header = T)
+## Gistic Data
+df_gistic <- read.csv(paste(dir_data, "Gistic_Genes.csv",
+                         sep = "/"), header = T)
+```
+
+## Data Wrangling
+```{r}
+## Remove some columns
+## RNA
+df_rna$X <- NULL
+df_rna$ensembl_gene_id_version <- NULL
+## WES
+df_wes$X <- NULL
+## Gistic
+rownames(df_gistic) <- df_gistic[,1]
+rownames(df_gistic) <- gsub("\\-", ".", rownames(df_gistic))
+df_gistic[,1]       <- NULL
+
+## Set index
+## RNA
+rownames(df_rna) <- df_rna$hgnc_symbol
+df_rna$hgnc_symbol <- NULL
+df_rna <- t(df_rna)
+## WES
+rownames(df_wes) <- df_wes$Tumor_Sample_Barcode
+df_wes$Tumor_Sample_Barcode <- NULL
+```
+
+```{r}
+## Check
+dim(df_rna);dim(df_wes);dim(df_gistic)
+View(df_rna);View(df_wes);View(df_gistic)
+```
+
+```{r}
+## Select only common patients
+common_patients <- intersect(intersect(rownames(df_rna),
+                                       rownames(df_wes)),
+                             rownames(df_gistic))
+df_rna_final    <- df_rna[rownames(df_rna) %in% common_patients,
+                          1:dim(df_rna)[2]]
+df_wes_final    <- df_wes
+df_gistic_final <- df_gistic[rownames(df_gistic) %in% common_patients,
+                          1:dim(df_gistic)[2]]
+```
+
+
+### SNF Tool
+```{r}
+## Compute the affinity matrix 
+
+## Set parameters
+K     <- 10  ## Number of neighbors, must be greater than 1; usually (10~30)
+alpha <- 0.5 ## Hyperparameter, usually (0.3~0.8)
+t     <- 20  ## Number of Iterations, usually (10~50)
+
+## Calculate distance matrices
+Dist_1 <- (dist2(as.matrix(df_rna_final), as.matrix(df_wes_final)))^(1/2)
+Dist_2 <- (dist2(as.matrix(df_wes_final), as.matrix(df_rna_final)))^(1/2)
+DIst_3 <- (dist2(as))
+
+## Similarity graphs
+W1 <- affinityMatrix(Dist_1, K, alpha)
+W2 <- affinityMatrix(Dist_2, K, alpha)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+
+

@@ -1,0 +1,83 @@
+---
+title: "WES Analysis"
+author: "Davide Mascolo"
+date: "2023-07-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Data
+```{r}
+## Load Directory
+source_data_path <- getwd()
+
+## Load WES data
+wes_counts <- read.csv("wes_counts.csv", header = T)
+```
+
+```{r}
+## Check
+dim(wes_counts)
+View(wes_counts)
+
+## Data Wrangling
+rownames(wes_counts) <- wes_counts$Tumor_Sample_Barcode
+wes_counts$Tumor_Sample_Barcode <- NULL
+
+## Check
+dim(wes_counts)
+View(wes_counts)
+
+## Traspose
+df_wes_counts <- t(wes_counts)
+```
+
+## Create Network
+```{r}
+## Compute Hubs
+hubs_exome <- compute_hubs(df_wes_counts)
+```
+
+```{r}
+## Analysis 
+
+## Plot degree distribution in order to check if the network
+## is scale free
+df1           <- data.frame(cbind(hubs_exome$degree))
+colnames(df1) <- "Degree"
+(hist_response <- ggplot(df1, aes(x = Degree)) +
+    geom_histogram(fill = "blue", alpha = 0.7, bins = 30) +
+    ggtitle("Degree Distribution Exome Data") +
+    xlab("Degree") +
+    ylab("Frequency") +
+    theme_minimal())
+## Scale-free
+```
+
+```{r}
+## Compute Network
+net_exome <- network(df_wes_counts, matrix.type = "adjacency",
+                     ignore.eval = FALSE, names.eval = "weights",
+                     directed = FALSE)
+## Compute density
+network.density(net_exome)
+## Giant component
+nrow(component.largest(net_exome, result = "graph")) ## 617
+
+## How many positive/negative correlations?
+sum(adj_mat_response == 1)  ## 10090
+sum(adj_mat_response == -1) ## 0
+## Ratio
+sum(adj_mat_response == 1) / sum(adj_mat_response == -1)
+
+
+## Plot Response hubs
+plot_graph(net_exome, hubs_exome$code_hubs,
+           title = "Co-Expression Network - Exome Data")
+```
+
+
+

@@ -1,0 +1,1319 @@
+---
+title: "Preparation Network Analysis"
+author: "Davide Mascolo"
+date: "2023-06-01"
+output: html_document
+---
+
+The goal of this notebook is to import the two different datasets: - rna_counts_pr_cr: response group - rna_counts_sd_pd: resistance group
+
+This two are filtered considering the genes that are expressed and are shown in the volcano plot.
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Utils and Setup
+```{r}
+## Import libraries
+library(psych)
+library(network)
+library(sna)
+library(ggnet)
+library(GGally)
+library(WGCNA)
+library(igraph)
+library(intergraph)
+library(gplots)
+library(biomaRt)
+```
+
+## Load Normalized Data
+```{r}
+## Response Group
+df_response   <- read.csv("rna_counts_pr_cr_normalized.csv",
+                          header = T)
+## Resistance Group
+df_resistance <- read.csv("rna_counts_sd_pd_normalized.csv",
+                          header = T)
+## Differential Expressed Genes
+df_diff_exp   <- read.csv("diff_expressed_genes.csv",
+                          header = T)
+## Load gene names
+ensembl_gene_id_version <- read.csv("names_gene.csv",
+                                    header = T)$names_gene
+```
+
+## Data Wrangling
+```{r}
+## Set index
+## Response
+row.names(df_response)   <- df_response$Name
+
+## Resistance
+row.names(df_resistance) <- df_resistance$Name
+
+## Differential
+row.names(df_diff_exp)   <- df_diff_exp$Name
+```
+
+```{r}
+## Check
+dim(df_response)
+dim(df_resistance)
+dim(df_diff_exp)
+```
+
+```{r}
+## View
+View(head(df_response))
+View(head(df_resistance))
+View(head(df_diff_exp))
+```
+
+```{r}
+## Now we can use the filtered genes to obtain the two complete datasets
+
+## Response Group
+list_diff_expr_response <- intersect(df_response$Name, df_diff_exp$ensembl_gene_id_version)
+
+## Resistance Group
+list_diff_expr_resistance <- intersect(df_resistance$Name, df_diff_exp$ensembl_gene_id_version)
+
+## Save description names
+genes_response   <- df_diff_exp %>%
+  filter(ensembl_gene_id_version %in% list_diff_expr_response)
+genes_resistance <- df_diff_exp %>%
+  filter(ensembl_gene_id_version %in% list_diff_expr_resistance)
+
+## Select
+genes_response <- as.data.frame(cbind(genes_response$ensembl_gene_id_version, genes_response$hgnc_symbol))
+colnames(genes_response) <- c("ID_Version", "Description")
+
+genes_resistance <- as.data.frame(cbind(genes_resistance$ensembl_gene_id_version, genes_resistance$hgnc_symbol))
+colnames(genes_resistance) <- c("ID_Version", "Description")
+
+## Check
+length(list_diff_expr_response)
+length(list_diff_expr_resistance)
+```
+
+```{r}
+## At this point it's possible to filter the data
+
+## Response Group
+df_response_filtered <- df_response %>% 
+  filter(Name %in% list_diff_expr_response)
+df_response_filtered$Name <- NULL
+
+## Resistance Group
+df_resistance_filtered <- df_resistance %>% 
+  filter(Name %in% list_diff_expr_resistance)
+df_resistance_filtered$Name <- NULL
+
+## Check
+dim(df_response_filtered)
+dim(df_resistance_filtered)
+```
+
+```{r}
+## View
+View(head(df_response_filtered))
+View(head(df_resistance_filtered))
+```
+
+```{r}
+## Save
+write.csv(df_response_filtered,
+          file = "df_response_filtered.csv")
+write.csv(df_resistance_filtered,
+          file = "df_resistance_filtered.csv")
+```
+
+
+## Custom Fuctions
+```{r}
+## Custom Functions
+## Implement a function that computes the hubs of the network
+compute_adjacency <- function(data, cor_type = NULL){
+  ## Input:  Expression Data
+  ## Output: Adjacency matrix
+  
+  ## Correlation matrix 
+  cor_mat       <- cor(t(data), method = cor_type)
+  diag(cor_mat) <- 0
+  ## Correlation matrix (p-value)
+  cor_padj <- corr.p(cor_mat, nrow(cor_mat),
+                     adjust = "fdr", ci = FALSE)$p
+  cor_padj[lower.tri(cor_padj)] <- t(cor_padj)[lower.tri(cor_padj)]
+  ## Build adjacency matrix
+  adj_mat_1 <- ifelse(cor_mat >= 0.7, 1,
+                      ifelse(cor_mat <= -0.7,-1, 0))
+  adj_mat_2 <- ifelse(abs(cor_padj) > 0.05, 0, 1) 
+  adj_mat   <- adj_mat_1 * adj_mat_2
+  
+  ## Return
+  return(adj_mat)
+}
+
+## Implement a function that returns the list of the hubs
+mart_names <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+compute_hubs <- function(adj_matrix, mart = mart_names){
+  ## Input: Adjacency Matrix, mart
+  ## Output: List of hubs, Degree, Level of quantile
+  
+  ## Compute degree
+  degree <- sort(rowSums(abs(adj_matrix)), decreasing = TRUE)
+  ## Compute quantile
+  q_95 <- quantile(degree[degree > 0], 0.95)
+  ## Find the hubs (5% of the nodes with highest degree values)
+  hubs <- degree[degree >= q_95]
+  
+  ## Let's get the hubs' names
+  hubs_clean <- (str_split(names(hubs),
+                           "[.]", simplify = TRUE))[,1]
+  hubs_names <- getBM(filters = "ensembl_gene_id",
+                      attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                      values = hubs_clean, mart = mart)
+  
+  ## Let's order them by degree
+  hubs_ord <- (str_split(names(sort(hubs, decreasing = TRUE)),
+                         "[.]",simplify = TRUE))[,1]
+  hubs_names <- hubs_names[match(hubs_ord,
+                                 hubs_names$ensembl_gene_id),]
+  ## Check names
+  final_hubs <- hubs_names[,2]
+  
+  ## Return
+  return(list("code_hubs" = hubs,
+              "final_hubs" = final_hubs,
+              "degree" = degree,
+              "q_95" = q_95))
+}
+
+## Implement a function that plots the network with the hubs
+plot_graph <- function(net, hubs, title, subtitle = NULL){
+  ## Input:  Network, Hubs, Title, Subtitle
+  ## Output: Network Plot
+  
+  ## Get Names
+  net %v% "type"  <- ifelse(network.vertex.names(net) %in%
+                              names(hubs),
+                            "hub", "non-hub")
+  net %v% "color" <- ifelse(net %v% "type" == "hub",
+                            "red", "blue")
+  #edge_colors <- ifelse(net %e% "weights" > 0, "green", "blue")
+  #set.edge.attribute(net, "edgecolors", edge_colors)
+  
+  ## Get vertex
+  coord <- gplot.layout.fruchtermanreingold(net, NULL)
+  net %v% "x" = coord[, 1]
+  net %v% "y" = coord[, 2]
+  
+  ## Return Plot
+  ggnet2(net, color = "color", alpha = 0.7, size = 2,
+         mode = c("x","y"), edge.alpha = 1,
+         edge.size = 0.15) + guides(size = "none") +
+    ggtitle(title,
+            subtitle = subtitle)
+}
+
+## Implement the functions used to compute the soft thresholding
+soft_thresholding <- function(data, h_cutoff = 0.90, lwd = 1){
+  ## Input:  Transpose data, cut off for R^2
+  ## Output: Plots[Scale-free topology, Mean connectivity]
+  
+  ## Choose a set of soft-thresholding powers
+  powers <- c(1:20)
+  ## Call the network topology analysis function
+  sft <- pickSoftThreshold(t(data), powerVector = powers,
+                           verbose = 5)
+  
+  ## Plot the results
+  par(mfrow = c(1,2));
+  cex1 = 1.5;
+  plot(sft$fitIndices[,1],
+       -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+       xlab = "Soft Threshold (power)",
+       ylab = "Scale Free Topology Model Fit,signed R^2",
+       type = "n",
+       main = paste("Scale independence"),
+       lwd = lwd);
+  text(sft$fitIndices[,1],
+       -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+       labels = powers, cex = cex1, col = "red");
+  
+  ## This line corresponds to using an R^2 cut-off of h
+  abline(h = h_cutoff, col = "red", lwd = lwd)
+  
+  ## Mean connectivity as a function of the soft-thresholding power
+  plot(sft$fitIndices[,1], sft$fitIndices[,5],
+       xlab = "Soft Threshold (power)",
+       ylab = "Mean Connectivity", type = "n",
+       main = paste("Mean connectivity"),
+       lwd = lwd)
+  text(sft$fitIndices[,1], sft$fitIndices[,5],
+       labels = powers, cex = cex1, col = "red")
+}
+
+soft_adjacency <- function(data, beta){
+ ## Input:  Data, Beta
+ ## Output: Plots[Degree distribution, Scale Free]
+  
+  ## Correlation matrix
+  cor_mat       <- cor(t(data), method = "pearson")
+  diag(cor_mat) <- 0
+  
+  ## Soft adjacency
+  soft_adj <- abs(cor_mat)^beta
+  
+  ## Compute degree
+  connectivity <- apply(soft_adj, 2, sum)
+  
+  hist(connectivity, main = "Distribution of Connectivity",
+       xlab = "Connectiity", col = "blue")
+
+  
+  ## Scale Free Plot
+  scaleFreePlot(connectivity)
+}
+
+## Compute
+## Implement a function to compute different CI measures
+## (Betwness, Closeness, Eigenvector)
+CI_measures <- function(net, CI_type, mart = mart_names){
+  ## Input:  Network, CI measure, Mart
+  ## Output: Top 5% nodes with highest CI
+  
+  CI         <- CI_type(asIgraph(net))
+  CI_idx     <- (net %v% "vertex.names")[order(CI, decreasing = TRUE)]
+  CI_names_5 <- head(CI_idx, floor(0.05 * length(CI_idx)))
+  ## Let's get the hubs' names
+  hubs_clean_CI <- (str_split(CI_names_5, "[.]", simplify = TRUE))[,1]
+  hubs_names    <- getBM(filters = "ensembl_gene_id",
+                         attributes = c("ensembl_gene_id",
+                                        "hgnc_symbol"),
+                         values = hubs_clean_CI,
+                         mart = mart)
+    ## Return
+    return(hubs_names[,2])
+}
+
+## Implement a function to compute eigenvector metric
+CI_eigen <- function(net, CI_type, mart = mart_names){
+  ## Input:  Network, CI measure, Mart
+  ## Output: Top 5% nodes with highest CI
+  
+  CI         <- CI_type(asIgraph(net))
+  CI_idx     <- (net %v% "vertex.names")[order(CI$vector,
+                                               decreasing = TRUE)]
+  CI_names_5 <- head(CI_idx, floor(0.05 * length(CI_idx)))
+  ## Let's get the hubs' names
+  hubs_clean_CI <- (str_split(CI_names_5, "[.]", simplify = TRUE))[,1]
+  hubs_names    <- getBM(filters = "ensembl_gene_id",
+                         attributes = c("ensembl_gene_id",
+                                        "hgnc_symbol"),
+                         values = hubs_clean_CI,
+                         mart = mart)
+    ## Return
+    return(hubs_names[,2])
+}
+
+## Implement a function that returns the name of genes
+give_me_name <- function(gene_list){
+  ## Input: list of raw genes names 
+  ## Output: decoded name
+
+  ## Get the name
+  hubs_clean_CI <- (str_split(gene_list, "[.]",
+                              simplify = TRUE))[,1]
+  hub_name    <- getBM(filters = "ensembl_gene_id",
+                       attributes = c("ensembl_gene_id",
+                                      "hgnc_symbol"),
+                       values = hubs_clean_CI,
+                       mart = mart_names)
+  return(hub_name)
+}
+
+## Implement a function that returns if the gene is present in a list or not
+gene_present <- function(gene, list_gene){
+  ## Input: gene to check, list of gene
+  ## Output: Boolean value
+  return(gene %in% list_gene)
+}
+```
+
+## Network Analysis
+
+### Co-Expression Network (Pearson Correlation)
+```{r}
+## Compute Adjacency Matrix (Pearson)
+
+## Response Group
+adj_mat_response <- compute_adjacency(df_response_filtered,
+                                      cor_type = "pearson")
+## Resistance Group
+adj_mat_resistance <- compute_adjacency(df_resistance_filtered,
+                                        cor_type = "pearson")
+```
+
+```{r}
+## Compute
+
+## Response hubs
+hubs_response   <- compute_hubs(adj_mat_response)
+
+## Resistance hubs
+hubs_resistance <- compute_hubs(adj_mat_resistance)
+```
+
+```{r}
+## Analysis Response Group
+
+## Plot degree distribution in order to check if the network
+## is scale free
+df1           <- data.frame(cbind(hubs_response$degree))
+colnames(df1) <- "Degree"
+(hist_response <- ggplot(df1, aes(x = Degree)) +
+    geom_histogram(fill = "blue", alpha = 0.7, bins = 20) +
+    ggtitle("Degree Distribution (Response Group Co-Expression Network)",
+            subtitle = "using Pearson Correlation") +
+    xlab("Degree") +
+    ylab("Frequency") +
+    theme_minimal())
+## Scale-free
+```
+
+```{r}
+## Compute Response Network
+net_response <- network(adj_mat_response, matrix.type = "adjacency",
+                        ignore.eval = FALSE, names.eval = "weights",
+                        directed = FALSE)
+## Compute density
+network.density(net_response)
+## Giant component
+nrow(component.largest(net_response, result = "graph")) ## 617
+
+## How many positive/negative correlations?
+sum(adj_mat_response == 1)  ## 10090
+sum(adj_mat_response == -1) ## 0
+## Ratio
+sum(adj_mat_response == 1) / sum(adj_mat_response == -1)
+
+## Plot Response hubs
+plot_graph(net_response, hubs_response$code_hubs,
+           title = "Response Group Co-Expression Network",
+           subtitle = "using Pearson Correlation")
+```
+
+```{r}
+## Analysis Resistance Group
+
+## Plot degree distribution in order to check if the network
+## is scale free
+df2           <- data.frame(cbind(hubs_resistance$degree))
+colnames(df2) <- "Degree"
+(hist_resistance <- ggplot(df2, aes(x = Degree)) +
+  geom_histogram(fill = "blue", alpha = 0.7, bins = 20) +
+  ggtitle("Degree Distribution (Resistance Group Co-Expression Network)",
+            subtitle = "using Pearson Correlation") +
+  xlab("Degree") +
+  ylab("Frequency") +
+  theme_minimal())
+## Scale-free
+```
+
+```{r}
+## Compute Resistance Network
+net_resistance <- network(adj_mat_resistance, matrix.type = "adjacency",
+                          ignore.eval = FALSE, names.eval = "weights",
+                          directed = FALSE)
+## Compute density
+network.density(net_resistance)
+## Giant component
+nrow(component.largest(net_resistance, result = "graph")) ## 677
+
+## How many positive/negative correlations?
+sum(adj_mat_resistance == 1)  ## 4488
+sum(adj_mat_resistance == -1) ## 0
+
+## Plot Resitance hubs
+plot_graph(net_resistance, hubs_resistance$code_hubs,
+           title = "Resistance Group Co-Expression Network",
+           subtitle = "using Pearson Correlation")
+```
+
+```{r}
+## Common Response Hubs and Resistance Hubs
+message("Common Response Hubs and Resistance Hubs")
+intersect(hubs_response$final_hubs, hubs_resistance$final_hubs)
+message("N: ", length(intersect(hubs_response$final_hubs, hubs_resistance$final_hubs)))
+message("\n")
+
+## Non Common Response Hubs and Resistance Hubs
+message("Hubs that are in Response but not in Resistance Group")
+setdiff(hubs_response$final_hubs, hubs_resistance$final_hubs)
+message("N: ", length(setdiff(hubs_response$final_hubs, hubs_resistance$final_hubs)))
+message("\n")
+
+message("Hubs that are in Resistance but not in Response Group")
+setdiff(hubs_resistance$final_hubs, hubs_response$final_hubs)
+message("N: ", length(setdiff(hubs_resistance$final_hubs, hubs_response$final_hubs)))
+message("\n")
+
+## Identify the hubs characterizing only response group
+message("Hubs Response Group")
+hubs_response$final_hubs
+message("N: ", length(hubs_response$final_hubs))
+message("\n")
+
+## Identify the hubs characterizing only resistance group
+message("Hubs Resistance Group")
+hubs_resistance$final_hubs
+message("N: ", length(hubs_resistance$final_hubs))
+```
+
+```{r}
+## If run again this chunk, then move the files to enrich them.
+
+## Save the two lists in order to perform Enrichment Analysis
+#common_genes_pearson_list <- intersect(hubs_response$final_hubs, hubs_resistance$final_hubs)
+#output <- "common_genes_pearson_to_enrich"
+#writeLines(common_genes_pearson_list, output)
+
+## Hubs Resistance group
+#hubs_resistance_list <- hubs_resistance$final_hubs
+#output <- "hubs_resistance_pearson_to_enrich"
+#writeLines(hubs_resistance_list, output)
+
+## Hubs Response group
+#hubs_response_list <- hubs_response$final_hubs
+#output <- "hubs_response_pearson_to_enrich"
+#writeLines(hubs_response_list, output)
+
+## Hubs Response but NOT Resistance
+#hubs_response_not_resistance_list <- setdiff(hubs_response$final_hubs, hubs_resistance$final_hubs)
+#output <- "hubs_response_not_resistance_pearson_to_enrich"
+#writeLines(hubs_response_not_resistance_list, output)
+
+## Hubs Resistance but NOT Response 
+#hubs_resistance_not_response_list <- setdiff(hubs_resistance$final_hubs, hubs_response$final_hubs)
+#output <- "hubs_resistance_not_response_pearson_to_enrich"
+#writeLines(hubs_resistance_not_response_list, output)
+```
+
+### Co-Expression Network (Spearman Correlation)
+
+At this point, we make the same operations using a different correlation measure ---\> Spearman
+```{r}
+## Compute Adjacency Matrix (Spearman)
+
+## Response Group
+adj_mat_response_sp   <- compute_adjacency(df_response_filtered,
+                                           cor_type = "spearman")
+## Resistance Group
+adj_mat_resistance_sp <- compute_adjacency(df_resistance_filtered,
+                                        cor_type = "spearman")
+```
+
+```{r}
+## Compute
+
+## Response hubs
+hubs_response_sp   <- compute_hubs(adj_mat_response_sp)
+
+## Resistance hubs
+hubs_resistance_sp <- compute_hubs(adj_mat_resistance_sp)
+```
+
+```{r}
+## Analysis Response Group
+
+## Plot degree distribution in order to check if the network
+## is scale free
+df3           <- data.frame(cbind(hubs_response_sp$degree))
+colnames(df3) <- "Degree"
+(hist_response_sp <- ggplot(df3, aes(x = Degree)) +
+    geom_histogram(fill = "blue", alpha = 0.7, bins = 20) +
+    ggtitle("Degree Distribution (Response Group Co-Expression Network)",
+            subtitle = "using Spearman Correlation") +
+    xlab("Degree") +
+    ylab("Frequency") +
+    theme_minimal())
+## Scale-free
+```
+
+```{r}
+## Compute Response Network
+net_response_sp <- network(adj_mat_response_sp, matrix.type = "adjacency",
+                           ignore.eval = FALSE, names.eval = "weights",
+                           directed = FALSE)
+## Compute density
+network.density(net_response_sp)
+## Giant component
+nrow(component.largest(net_response_sp, result = "graph")) ## 475
+
+## How many positive/negative correlations?
+sum(adj_mat_response_sp == 1)  ## 9350
+sum(adj_mat_response_sp == -1) ## 106
+## Ratio
+sum(adj_mat_response_sp == 1) / sum(adj_mat_response_sp == -1)
+
+## Plot Response hubs
+plot_graph(net_response_sp, hubs_response$code_hubs,
+           title = "Response Group Co-Expression Network",
+           subtitle = "using Spearman Correlation")
+```
+
+```{r}
+## Analysis Resistance Group
+
+## Plot degree distribution in order to check if the network
+## is scale free
+df4           <- data.frame(cbind(hubs_resistance_sp$degree))
+colnames(df4) <- "Degree"
+(hist_resistance_sp <- ggplot(df4, aes(x = Degree)) +
+  geom_histogram(fill = "blue", alpha = 0.7, bins = 20) +
+  ggtitle("Degree Distribution (Resistance Group Co-Expression Network)",
+          subtitle = "using Spearman Correlation") +
+  xlab("Degree") +
+  ylab("Frequency") +
+  theme_minimal())
+## Scale-free
+```
+
+```{r}
+## Compute Resistance Network
+net_resistance_sp <- network(adj_mat_resistance_sp,
+                             matrix.type = "adjacency",
+                             ignore.eval = FALSE, names.eval = "weights",
+                             directed = FALSE)
+## Compute density
+network.density(net_resistance_sp)
+## Giant component
+nrow(component.largest(net_resistance_sp, result = "graph")) ## 281
+
+## How many positive/negative correlations?
+sum(adj_mat_resistance_sp == 1)  ## 8270
+sum(adj_mat_resistance_sp == -1) ## 0
+
+## Plot Resitance hubs
+plot_graph(net_resistance_sp, hubs_resistance$code_hubs,
+           title = "Resistance Group Co-Expression Network",
+           subtitle = "using Spearman Correlation")
+```
+
+```{r}
+## Common Response Hubs and Resistance Hubs
+message("Common Response Hubs and Resistance Hubs")
+intersect(hubs_response_sp$final_hubs, hubs_resistance_sp$final_hubs)
+message("N: ", length(intersect(hubs_response_sp$final_hubs, hubs_resistance_sp$final_hubs)))
+message("\n")
+
+## Non Common Response Hubs and Resistance Hubs
+message("Hubs that are in Response but not in Resistance Group")
+setdiff(hubs_response_sp$final_hubs, hubs_resistance_sp$final_hubs)
+message("N: ", length(setdiff(hubs_response_sp$final_hubs, hubs_resistance_sp$final_hubs)))
+message("\n")
+
+message("Hubs that are in Resistance but not in Response Group")
+setdiff(hubs_resistance_sp$final_hubs, hubs_response_sp$final_hubs)
+message("N: ", length(setdiff(hubs_resistance_sp$final_hubs, hubs_response_sp$final_hubs)))
+message("\n")
+
+## Identify the hubs characterizing only response group
+message("Hubs Response Group")
+hubs_response_sp$final_hubs
+message("N: ", length(hubs_response_sp$final_hubs))
+message("\n")
+
+## Identify the hubs characterizing only resistance group
+message("Hubs Resistance Group")
+hubs_resistance_sp$final_hubs
+message("N: ", length(hubs_resistance_sp$final_hubs))
+```
+
+```{r}
+## If run again this chunk, then move the files to enrich them.
+
+## Save the two lists in order to perform Enrichment Analysis
+#common_genes_spearman_list <- intersect(hubs_response_sp$final_hubs, hubs_resistance_sp$final_hubs)
+#output <- "common_genes_spearman_to_enrich"
+#writeLines(common_genes_spearman_list, output)
+
+## Hubs Resistance group
+#hubs_resistance_list <- hubs_resistance_sp$final_hubs
+#output <- "hubs_resistance_spearman_to_enrich"
+#writeLines(hubs_resistance_list, output)
+
+## Hubs Response group
+#hubs_response_list <- hubs_response_sp$final_hubs
+#output <- "hubs_response_pearson_to_enrich"
+#writeLines(hubs_response_list, output)
+
+## Hubs Response but NOT Resistance
+#hubs_response_not_resistance_list <- setdiff(hubs_response_sp$final_hubs, hubs_resistance_sp$final_hubs)
+#output <- "hubs_response_not_resistance_spearman_to_enrich"
+#writeLines(hubs_response_not_resistance_list, output)
+
+## Hubs Resistance but NOT Response 
+#hubs_resistance_not_response_list <- setdiff(hubs_resistance_sp$final_hubs, hubs_response_sp$final_hubs)
+#output <- "hubs_resistance_not_response_spearman_to_enrich"
+#writeLines(hubs_resistance_not_response_list, output)
+```
+
+### Co-Expression Network (Kendall Correlation)
+
+At this point, we make the same operations using a different correlation measure ---\> Kendall
+```{r}
+## Compute Adjacency Matrix (kendall)
+
+## Response Group
+adj_mat_response_ke   <- compute_adjacency(df_response_filtered,
+                                           cor_type = "kendall")
+## Resistance Group
+adj_mat_resistance_ke <- compute_adjacency(df_resistance_filtered,
+                                        cor_type = "kendall")
+```
+
+```{r}
+## Compute
+
+## Response hubs
+hubs_response_ke   <- compute_hubs(adj_mat_response_ke)
+
+## Resistance hubs
+hubs_resistance_ke <- compute_hubs(adj_mat_resistance_ke)
+```
+
+```{r}
+## Analysis Response Group
+
+## Plot degree distribution in order to check if the network
+## is scale free
+df5           <- data.frame(cbind(hubs_response_sp$degree))
+colnames(df5) <- "Degree"
+(hist_response_ke <- ggplot(df5, aes(x = Degree)) +
+  geom_histogram(fill = "blue", alpha = 0.7, bins = 20) +
+    ggtitle("Degree Distribution (Response Group Co-Expression Network)",
+            subtitle = "using Kendall Correlation") +
+    xlab("Degree") +
+    ylab("Frequency") +
+    theme_minimal())
+## Scale-free
+```
+
+```{r}
+## Compute Response Network
+net_response_ke <- network(adj_mat_response_ke, matrix.type = "adjacency",
+                           ignore.eval = FALSE, names.eval = "weights",
+                           directed = FALSE)
+## Compute density
+network.density(net_response_ke)
+## Giant component
+nrow(component.largest(net_response_ke, result = "graph")) ## 41
+
+## How many positive/negative correlations?
+sum(adj_mat_response_ke == 1)  ## 382
+sum(adj_mat_response_ke == -1) ## 0
+
+## Plot Response hubs
+plot_graph(net_response_ke, hubs_response$code_hubs,
+           title = "Response Group Co-Expression Network",
+           subtitle = "using Kendall Correlation")
+```
+
+```{r}
+## Analysis Resistance Group
+
+## Plot degree distribution in order to check if the network
+## is scale free
+df6           <- data.frame(cbind(hubs_resistance_ke$degree))
+colnames(df6) <- "Degree"
+(hist_resistance_ke <- ggplot(df6, aes(x = Degree)) +
+  geom_histogram(fill = "blue", alpha = 0.7, bins = 8) +
+  ggtitle("Degree Distribution (Resistance Group Co-Expression Network)",
+          subtitle = "using Kendall Correlation") +
+  xlab("Degree") +
+  ylab("Frequency") +
+  theme_minimal())
+## Scale-free
+```
+
+```{r}
+## Compute Resistance Network
+net_resistance_ke <- network(adj_mat_resistance_ke,
+                             matrix.type = "adjacency",
+                             ignore.eval = FALSE, names.eval = "weights",
+                             directed = FALSE)
+## Compute density
+network.density(net_resistance_ke)
+## Giant component
+nrow(component.largest(net_resistance_ke, result = "graph")) ## 26
+
+## How many positive/negative correlations?
+sum(adj_mat_resistance_ke == 1)  ## 156
+sum(adj_mat_resistance_ke == -1) ## 0
+
+## Plot Resitance hubs
+plot_graph(net_resistance_ke, hubs_resistance$code_hubs,
+           title = "Resistance Group Co-Expression Network",
+           subtitle = "using Kendall Correlation")
+```
+
+```{r}
+## Comparison between reponse and resistance hubs
+intersect(hubs_response_ke$final_hubs, hubs_resistance_ke$final_hubs)
+message("N: ", length(intersect(hubs_response_ke$final_hubs, hubs_resistance_ke$final_hubs)))
+message("\n")
+## Identify the hubs characterizing only resistance group
+hubs_resistance_ke$final_hubs
+message("N: ", length(hubs_resistance_ke$final_hubs))
+```
+
+```{r}
+## Compare the hubs
+
+## Response - Response (Pearson Vs. Spearman)
+message("Response Group using Pearson and Spearman Correlations")
+common_genes_response <- intersect(hubs_response$final_hubs, hubs_response_sp$final_hubs)
+message("Number of common genes: ", length(common_genes_response))
+common_genes_response
+message("\n")
+
+## Resistance - Resistance (Pearson Vs. Spearman)
+message("Resistance Group using Pearson and Spearman Correlations")
+common_genes_resistance <- intersect(hubs_resistance$final_hubs, hubs_resistance_sp$final_hubs)
+message("Number of common genes: ", length(common_genes_resistance))
+common_genes_resistance
+message("\n")
+
+## Response - Resistance (Pearson)
+message("Response Group Vs. Resistance Group using Pearson Correlation")
+commong_genes_response_resistance <- intersect(hubs_response$final_hubs,
+                                               hubs_resistance$final_hubs)
+message("Number of common genes: ", length(commong_genes_response_resistance))
+commong_genes_response_resistance
+message("\n")
+
+## Response - Resistance (Spearman)
+message("Response Group Vs. Resistance Group using Spearman Correlation")
+commong_genes_response_resistance_sp <-
+  intersect(hubs_response_sp$final_hubs, hubs_resistance_sp$final_hubs)
+message("Number of common genes: ", length(commong_genes_response_resistance_sp))
+commong_genes_response_resistance_sp
+message("\n")
+```
+
+```{r}
+## If run again this chunk, then move the files to enrich them.
+
+## Save lists
+## Genes for response group (Pearson Vs. Spearman)
+#response_genes <- intersect(hubs_response$final_hubs, hubs_response_sp$final_hubs)
+#output <- "response_genes_pearson_spearman_to_enrich"
+#writeLines(response_genes, output)
+
+## Genes for resistance group (Pearson Vs. Spearman)
+#resistance_genes <- intersect(hubs_resistance$final_hubs, hubs_resistance_sp$final_hubs)
+#output <- "resistance_genes_pearson_spearman_to_enrich"
+#writeLines(resistance_genes, output)
+
+## Response Vs. Resistance with Pearson
+#common_genes_pearson <- intersect(hubs_response$final_hubs, hubs_resistance$final_hubs)
+#output <- "common_genes_response_resistance_pearson_to_enrich"
+#writeLines(common_genes_pearson, output)
+
+## Response Vs. Resistance with Spearman
+#common_genes_spearman <- intersect(hubs_response_sp$final_hubs, hubs_resistance_sp$final_hubs)
+#output <- "common_genes_response_resistance_spearman_to_enrich"
+#writeLines(common_genes_spearman, output)
+```
+
+```{r}
+## Not common Pearson
+not_in_common_pe <- subset(hubs_response$final_hubs,
+                           !hubs_response$final_hubs %in%
+                             hubs_resistance$final_hubs)
+message("Number of non common genes with Pearson Correlation: ", length(not_in_common_pe))
+not_in_common_pe
+message("\n")
+
+## Not in common Spearman
+not_in_common_sp <- subset(hubs_response_sp$final_hubs,
+                        !hubs_response_sp$final_hubs %in%
+                        hubs_resistance_sp$final_hubs)
+message("Number of non common genes with Spearman Correlation: ", length(not_in_common_sp))
+not_in_common_sp
+message("\n")
+```
+
+### Soft-Thresholding
+```{r}
+## Response Group
+soft_thresholding(df_response_filtered)
+## Beta 19, R^2 = 0.988, slope = -1.350
+```
+
+```{r}
+## Response Group
+soft_adjacency(df_response_filtered, 19)
+```
+
+```{r}
+## Resistance Group
+soft_thresholding(df_resistance_filtered)
+## Beta 10, R^2 = 0.85700, slope = -1.670
+```
+
+```{r}
+## Resistance Group
+soft_adjacency(df_resistance_filtered, 10)
+```
+
+### Different Centrality Index
+
+At this point, we compute the hubs of the network using different Centrality Index (CI) measures and we make a comparison with the genes obtained in the previous steps.
+```{r}
+## Resistance Group
+
+## Pearson
+## Betweenness
+message("Resistance Network with Pearson and Betweenness")
+(betweenness_top_5_c <- CI_measures(net_resistance, betweenness))
+message("N: ", length(betweenness_top_5_c))
+## Closeness
+message("Resistance Network with Pearson and Closeness")
+(closeness_top_5_c   <- CI_measures(net_resistance, closeness))
+message("N: ", length(closeness_top_5_c))
+## Eigenvector
+message("Resistance Network with Pearson and Eigenvector")
+(eigenvector_top_5_c <- CI_eigen(net_resistance, evcent))
+message("N: ", length(eigenvector_top_5_c))
+message("\n")
+
+## Spearman
+## Betweenness
+message("Resistance Network with Spearman and Betweenness")
+(betweenness_top_5_c_sp <- CI_measures(net_resistance_sp,
+                                       betweenness))
+message("N: ", length(betweenness_top_5_c_sp))
+## Closeness
+message("Resistance Network with Spearman and Closeness")
+(closeness_top_5_c_sp   <- CI_measures(net_resistance_sp,
+                                       closeness))
+message("N: ", length(closeness_top_5_c_sp))
+## Eigenvector
+message("Resistance Network with Spearman and Eigenvector")
+(eigenvector_top_5_c_sp <- CI_eigen(net_resistance_sp,
+                                    evcent))
+message("N: ", length(eigenvector_top_5_c_sp))
+```
+
+```{r}
+## Intersection
+
+## Pearson Correlation
+## Betwness
+message("Resistance Group:")
+genes_betwness <- intersect(hubs_resistance$final_hubs,
+                            betweenness_top_5_c)
+message("Genes with Betweness and Pearson Correlation: ", length(genes_betwness))
+genes_betwness
+message("\n")
+
+## Closeness
+genes_closeness <- intersect(hubs_resistance$final_hubs,
+                             closeness_top_5_c)
+message("Genes with Closeness and Pearson Correlation: ", length(genes_closeness))
+genes_closeness
+message("\n")
+
+## Eigenvector
+genes_eigenvector <- intersect(hubs_resistance$final_hubs,
+                               eigenvector_top_5_c)
+message("Genes with Eigenvector and Pearson Correlation: ", length(genes_eigenvector))
+genes_eigenvector
+message("\n")
+
+## Spearman Correlation
+## Betwness
+genes_betwness_sp <- intersect(hubs_resistance_sp$final_hubs,
+                               betweenness_top_5_c_sp)
+message("Genes with Betweness and Spearman Correlation: ",
+        length(genes_betwness_sp))
+genes_betwness_sp
+message("\n")
+
+## Closeness
+genes_closeness_sp <- intersect(hubs_resistance_sp$final_hubs,
+                             closeness_top_5_c)
+message("Genes with Closeness and Spearman Correlation: ",
+        length(genes_closeness_sp))
+genes_closeness_sp
+message("\n")
+
+## Eigenvector
+genes_eigenvector_sp <- intersect(hubs_resistance_sp$final_hubs,
+                               eigenvector_top_5_c)
+message("Genes with Eigenvector and Spearman Correlation: ",
+        length(genes_eigenvector_sp))
+genes_eigenvector_sp
+message("\n")
+```
+
+### Differential Co-Expressed Network
+```{r}
+## Compute correlations
+## Response data
+co_net_corr_response <- cor(t(df_response_filtered),
+                            method = "pearson")
+diag(co_net_corr_response) <- 0
+
+## Resistance data
+co_net_corr_resistance <- cor(t(df_resistance_filtered),
+                              method = "pearson")
+diag(co_net_corr_resistance) <- 0
+```
+
+```{r}
+## Calculation of differential correlations
+## Apply Fisher z-transformation
+z_response <- 0.5 * log((1 + co_net_corr_response) / (1 - co_net_corr_response))
+z_resistance <- 0.5 * log((1 + co_net_corr_resistance) / (1 - co_net_corr_resistance))
+
+## Sample size for each of the condition
+n_response   <- ncol(df_response_filtered)
+n_resistance <- ncol(df_resistance_filtered)
+
+## Z-score to evaluate the correlation
+Z <- (z_response - z_resistance) / sqrt(1/(n_response - 3) + (1/(n_resistance - 3)))
+
+## Threshold --> how do we find the optimal one?
+t <- 3
+## Provare diversi valori di t(valori più alti)
+## soglia: 4, 5, 6
+
+## Adjacency Matrix a_ij = 0, if |Z| < 3.
+adj_differential <- ifelse(abs(Z) < t, 0, 1)
+```
+
+```{r}
+## Generate network
+net_diff_coex <- graph_from_adjacency_matrix(adj_differential,
+                                             mode = "undirected",
+                                             diag = FALSE)
+## Plot network
+ggnet2(net_diff_coex, color = "blue", alpha = 0.7, size = 2,
+       edge.color = "grey", edge.alpha = 1, edge.size = 0.15) + 
+  guides(size = "none") +
+  ggtitle("Differential Co-Expression Network") +
+  theme_minimal() +
+  xlab("") + ylab("")
+```
+
+```{r}
+## Analysis
+## Compute the degree index
+degree_diff_coex <- sort(rowSums(adj_differential),
+                         decreasing = TRUE)
+
+## Who is the most connected hub?
+hub_most_connected <- degree_diff_coex[1]
+## First 50 hubs
+hubs_most_connected_50 <- degree_diff_coex[1:50]
+
+## Extract the neighbours
+idx   <- which(colnames(adj_differential) == names(hub_most_connected))
+neigh <- names(which(adj_differential[,idx] == 1))
+neigh <- c(neigh, names(hub_most_connected))
+
+## Extract the names
+## Hub most connected
+give_me_name(names(hub_most_connected))
+
+## Neighbors (117)
+give_me_name(neigh)
+
+## 50 Hub most connected
+give_me_name(names(hubs_most_connected_50))
+
+
+## Plot most connected hub with neighbors
+subgraph_hubs <- subgraph(net_diff_coex, neigh)
+V(subgraph_hubs)$color <- ifelse(V(subgraph_hubs)$name == names(hub_most_connected), "red", "blue")
+
+## Plot network 
+plot(subgraph_hubs, color = V(subgraph_hubs)$color,
+     vertex.label = NA,
+     vertex.size = 5)
+title("Subraph most connected hub with neighbors")
+mtext("most connected hub in red")
+```
+
+```{r}
+## Compute 95% percentile (Top 5% most connected hubs)
+degree_95  <- quantile(degree_diff_coex, 0.95)
+above_perc <- degree_diff_coex[degree_diff_coex > degree_95]
+min_value  <- min(above_perc)
+
+## Create Dataframe
+df5           <- data.frame(cbind(degree_diff_coex))
+colnames(df5) <- "Degree"
+
+## Plot degree distribution to check if the graph is a scale-free
+ggplot(df5, aes(x = Degree)) +
+  geom_histogram(fill = "blue", alpha = 0.7, bins = 20) +
+  ggtitle("Degree Distribution (Differential Co-Expression Network)",
+          subtitle = "using Adjacency Differential Matrix with |Z| < 3") +
+  geom_vline(xintercept = min_value, linetype = "dashed",
+             color = "red", linewidth = 1) +
+  geom_text(aes(x = degree_95, y = 100, label = "95th percentile = 59"),
+            color = "red", vjust = -0.5, hjust = -0.2) +
+  labs(x = "Degree", y = "Frequency")
+```
+
+```{r}
+## Compute hubs
+## how big is the degree of the most connected nodes?
+message("Degree of the most connected node")
+degree_95
+message("\n")
+
+## The 5% of the most connected nodes have a degree greater than 59
+## Find the hubs (5% of the nodes with highest degree values)
+message("5% of the most connected nodes have a degree greater than 59")
+hubs_diff_coex <- degree_diff_coex[degree_diff_coex >= degree_95]
+## Save this list
+#output <- "5%_hubs_diff_coex_raw"
+#writeLines(names(hubs_diff_coex), output)
+
+## Genes
+give_me_name(names(hubs_diff_coex))[,2]
+message("\n")
+## Save this list
+#output <- "5%_hubs_diff_coex"
+#writeLines(give_me_name(names(hubs_diff_coex))[,2], output)
+
+## How many?
+message("N: ");length(hubs_diff_coex)
+
+## Get names
+hubs_coexp_names <- give_me_name(names(hubs_diff_coex))
+```
+
+```{r}
+## Compute 90% percentile (Top 10% most connected hubs)
+degree_90  <- quantile(degree_diff_coex, 0.90)
+above_perc <- degree_diff_coex[degree_diff_coex > degree_90]
+min_value  <- min(above_perc)
+
+## Create Dataframe
+df6           <- data.frame(cbind(degree_diff_coex))
+colnames(df6) <- "Degree"
+
+## Plot degree distribution to check if the graph is a scale-free
+ggplot(df6, aes(x = Degree)) +
+  geom_histogram(fill = "blue", alpha = 0.7, bins = 20) +
+  ggtitle("Degree Distribution (Differential Co-Expression Network)",
+          subtitle = "using Adjacency Differential Matrix with |Z| < 3") +
+  geom_vline(xintercept = min_value, linetype = "dashed",
+             color = "red", linewidth = 1) +
+  geom_text(aes(x = degree_90, y = 100, label = ""),
+            color = "red", vjust = -0.5, hjust = -0.2) +
+  labs(x = "Degree", y = "Frequency")
+```
+
+
+```{r}
+## Compute hubs
+## how big is the degree of the most connected nodes?
+message("Degree of the most connected node")
+degree_90
+message("\n")
+
+## The 10% of the most connected nodes have a degree greater than 20
+## Find the hubs (10% of the nodes with highest degree values)
+message("10% of the most connected nodes have a degree greater than 20")
+hubs_diff_coex <- degree_diff_coex[degree_diff_coex >= degree_90]
+## Save this list
+#output <- "10%_hubs_diff_coex_raw"
+#writeLines(names(hubs_diff_coex), output)
+
+## Genes
+give_me_name(names(hubs_diff_coex))[,2]
+message("\n")
+## Save this list
+#output <- "10%_hubs_diff_coex"
+#writeLines(give_me_name(names(hubs_diff_coex))[,2], output)
+
+## How many?
+message("N: ");length(hubs_diff_coex)
+
+## Get names
+hubs_coexp_names <- give_me_name(names(hubs_diff_coex))
+```
+
+```{r}
+## Check
+
+## Pearson
+message("Common Co-Expressed Genes with Pearson Response hubs")
+## Common with resistance
+cat(intersect(hubs_coexp_names[,2], hubs_response$final_hubs),
+    collapse = '\n')
+message("Common Co-Expressed Genes with Pearson Resistance hubs")
+## Common with response
+cat(intersect(hubs_coexp_names[,2], hubs_resistance$final_hubs),
+    collapse = '\n')
+message("\n")
+
+## Spearman
+message("Common Co-Expressed Genes with Spearman Response hubs")
+## Common with resistance
+cat(intersect(hubs_coexp_names[,2], hubs_response_sp$final_hubs),
+    collapse = '\n')
+message("Common Co-Expressed Genes with Spearman Resistance hubs")
+## Common with response
+cat(intersect(hubs_coexp_names[,2], hubs_resistance_sp$final_hubs),
+    collapse = '\n')
+message("\n")
+
+## Kendall
+## Common with resistance
+message("Common Co-Expressed Genes with Kendall Resistance hubs")
+cat(intersect(hubs_coexp_names[,2], hubs_response_ke$final_hubs),
+    collapse = '\n')
+message("Common Co-Expressed Genes with Kendall Resistance hubs")
+## Common with response
+cat(intersect(hubs_coexp_names[,2], hubs_resistance_ke$final_hubs),
+    collapse = '\n')
+message("\n")
+```
+
+```{r}
+## Check if some genes are in the list of differentially expressed
+list_genes_to_check <- c("CACNA1A", "FRRS1L", "GPR137C", "MAGI2",
+                         "MCF2L2", "RFTN2", "SCN3B", "SCRG1",
+                         "SLC7A14", "TMEM130")
+gene_present(list_genes_to_check, df_diff_exp$hgnc_symbol)
+
+## Other genes
+list_genes_to_check <- c("CDH5", "EGFLAM", "KDR", "LIFR", "PARD3B",
+                         "PREX2", "PRKG1", "TEK", "VWF", "ZNF423")
+gene_present(list_genes_to_check, df_diff_exp$hgnc_symbol)
+```
+
+### Patient Similarity Network
+```{r}
+## In order to perform the PSN, we need to consider the whole dataset composed by Response and Resistance Group.
+
+## Response Group
+## Compute Euclidean Distance
+dist_eucl_response <- as.matrix(1 / (1+dist(t(df_response_filtered),
+                                            method = "euclidean")))
+## Set to 0 the diagonal of the matrix
+diag(dist_eucl_response) <- 0
+
+## We implement the network
+psn_network_response <- graph.adjacency(dist_eucl_response,
+                                        mode = "undirected",
+                                        weighted = TRUE)
+```
+
+```{r}
+## Plot Heatmap
+heatmap.2(dist_eucl_response,
+          main = "Heatmap Response Group (Euclidean Distance)",
+          margins = c(10, 10))
+```
+
+```{r}
+## Louvian Algorithm for Community Detection
+lc_response <- cluster_louvain(psn_network_response)
+## We can see the communities
+message("Communities:")
+communities(lc_response)
+
+## Create new attributes
+V(psn_network_response)$community <- lc_response$membership
+rain <- c("red", "blue", "green")
+V(psn_network_response)$color <- rain[V(psn_network_response)$community]
+## Set edges colors
+E(psn_network_response)$color <- apply(as.data.frame(
+  get.edgelist(psn_network_response)), 1, 
+                              function(x) ifelse((V(psn_network_response)$community[which(lc_response$names == x[1])] ==
+                                                    V(psn_network_response)$community[which(lc_response$names == x[2])]),
+                                                 rain[V(psn_network_response)$community[which(lc_response$names == x[1])]],
+                                                 "grey"))
+## Plot
+plot(psn_network_response, vertex.size = 4,
+     vertex.label = NA, edge.color = E(psn_network_response)$color,
+     main = "")
+```
+
+```{r}
+## Check Patients
+#community_01_response <- communities(lc_response)$"1"
+#community_02_response <- communities(lc_response)$"2"
+
+## Save lists
+#writeLines(community_01_response, "community_response_01.txt")
+#writeLines(community_02_response, "community_response_02.txt")
+```
+
+
+```{r}
+## Resistance Group
+
+## Compute Euclidean Stance
+dist_eucl_resistance <- as.matrix(1 / (1+dist(t(df_resistance_filtered),
+                                              method = "euclidean")))
+## Set to 0 the diagonal of the matrix
+diag(dist_eucl_resistance) <- 0
+
+## We implement the network
+psn_network_resistance <- graph.adjacency(dist_eucl_resistance,
+                                          mode = "undirected",
+                                          weighted = TRUE)
+```
+
+
+```{r}
+## Plot Heatmap
+heatmap.2(dist_eucl_response,
+          main = "Heatmap Resistance Group (Euclidean Distance)",
+          margins = c(10, 10))
+```
+
+
+```{r}
+## Louvian Algorithm for Community Detection
+lc_resistance <- cluster_louvain(psn_network_resistance)
+## We can see the communities
+communities(lc_resistance)
+
+## Create new attributes
+V(psn_network_resistance)$community <- lc_resistance$membership
+V(psn_network_resistance)$color <- rain[V(psn_network_resistance)$community]
+## Set edges colors
+E(psn_network_resistance)$color <- apply(as.data.frame(get.edgelist(psn_network_resistance)), 1, 
+                                function(x) ifelse((V(psn_network_resistance)$community[which(lc_resistance$names == x[1])] ==
+                                                      V(psn_network_resistance)$community[which(lc_resistance$names == x[2])]),
+                                                   rain[V(psn_network_resistance)$community[which(lc_resistance$names == x[1])]], "grey"))
+
+## Plot
+plot(psn_network_resistance, vertex.size = 4,
+     vertex.label = NA, edge.color = E(psn_network_resistance)$color,
+     main = "")
+```
+
+```{r}
+## Check Patients
+#community_01_resistance <- communities(lc_resistance)$"1"
+#community_02_resistance <- communities(lc_resistance)$"2"
+
+## Save lists
+#writeLines(community_01_resistance, "community_resistance_01.txt")
+#writeLines(community_02_resistance, "community_resistance_02.txt")
+```

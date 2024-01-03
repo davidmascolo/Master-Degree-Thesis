@@ -1,0 +1,278 @@
+---
+title: "Patient Similarity Network (Whole Dataset)"
+author: "Davide Mascolo"
+date: "2023-07-25"
+output: html_document
+---
+
+### Utils
+```{r}
+## Import libraries
+library(dplyr)
+library(igraph)
+library(gplots)
+```
+
+
+### Custom Functions
+```{r}
+## Create a function that returns the string in correct form
+clean_patient <- function(patients_list){
+  ## Input: list of patients code to format
+  ## Output: code formatted
+  return(gsub("SU2CLC.", "", patients_list))
+}
+```
+
+```{r}
+## Load Data
+df_response_filtered   <- read.csv("df_response_filtered.csv",
+                                   header = T)
+df_resistance_filtered <- read.csv("df_resistance_filtered.csv",
+                                   header = T)
+## Save information about X
+X_response   <- df_response_filtered$X
+gene_names   <- c(X_response)
+## Remove Xs
+df_response_filtered$X <- NULL
+df_resistance_filtered$X <- NULL
+## In order to perform the PSN, we need to consider the whole dataset composed by Response and Resistance Group.
+
+## Create complete dataset
+df_complete <- cbind(df_response_filtered, df_resistance_filtered)
+## Set rownames
+rownames(df_complete) <- gene_names
+## Check
+dim(df_complete)
+```
+
+### Patient Similarity Network
+```{r}
+## Compute distance
+dist_eucl   <- as.matrix(1 / (1+dist(t(df_complete),
+                                     method = "euclidean")))
+## Set to 0 the diagonal of the matrix
+diag(dist_eucl) <- 0
+
+## We implement the network
+psn_network <- graph.adjacency(dist_eucl,
+                               mode = "undirected",
+                               weighted = TRUE)
+```
+
+```{r}
+## Plot Heatmap
+heatmap.2(dist_eucl,
+          main = "Heatmap using Euclidean Distance",
+          margins = c(10, 10))
+```
+
+```{r}
+## Louvian Algorithm for Community Detection
+lc_community <- cluster_louvain(psn_network)
+## We can see the communities
+message("Communities:")
+communities(lc_community)
+
+## Create new attributes
+V(psn_network)$community <- lc_community$membership
+rain <- c("red", "blue", "green")
+V(psn_network)$color <- rain[V(psn_network)$community]
+## Set edges colors
+E(psn_network)$color <- apply(as.data.frame(
+  get.edgelist(psn_network)), 1, 
+                              function(x) ifelse((V(psn_network)$community[which(lc_community$names == x[1])] ==
+                                                    V(psn_network)$community[which(lc_community$names == x[2])]),
+                                                 rain[V(psn_network)$community[which(lc_community$names == x[1])]],
+                                                 "grey"))
+```
+
+```{r}
+## Plot
+plot(psn_network, vertex.size = 4,
+     vertex.label = NA, edge.color = E(psn_network)$color,
+     main = "Patient Similarity Network using Euclidean Distance")
+```
+
+```{r}
+## Check Patients
+community_01 <- communities(lc_community)$"1"
+community_02 <- communities(lc_community)$"2"
+community_03 <- communities(lc_community)$"3"
+
+## Save lists
+writeLines(community_01, "community_01.txt")
+writeLines(community_02, "community_02.txt")
+writeLines(community_03, "community_03.txt")
+```
+
+```{r}
+## Apply
+message("Community 01 Patients")
+message("N: ", length(clean_patient(community_01)))
+clean_patient(community_01)
+message("\n")
+
+message("Community 02 Patients")
+message("N: ", length(clean_patient(community_02)))
+clean_patient(community_02)
+message("\n")
+
+message("Community 03 Patients")
+message("N: ", length(clean_patient(community_03)))
+clean_patient(community_03)
+```
+
+
+
+### Patient Similarity Network using only the 5% most connected hubs for differential co-expression network
+```{r}
+## In order to perform the PSN, we need to consider the whole dataset composed by Response and Resistance Group.
+
+## Create complete dataset
+df_complete <- cbind(df_response_filtered, df_resistance_filtered)
+dim(df_complete)
+message("\n")
+
+## Load list of genes
+hubs_5  <- readLines("5%_hubs_diff_coex_raw.txt")
+hubs_10 <- readLines("10%_hubs_diff_coex_raw.txt")
+## Check
+message("Number of 5% genes: ", length(hubs_5))
+message("Number of 10% genes: ", length(hubs_10))
+```
+
+```{r}
+## Filter the dataframe
+df_hubs_5  <- subset(df_complete, rownames(df_complete) %in%
+                       hubs_5)
+df_hubs_10 <- subset(df_complete, rownames(df_complete) %in%
+                       hubs_10)
+## Check
+dim(df_hubs_5)
+dim(df_hubs_10)
+```
+
+
+```{r}
+## PSN
+dist_eucl_5 <- as.matrix(1 / (1+dist(t(df_hubs_5),
+                                     method = "euclidean")))
+## Set to 0 the diagonal of the matrix
+diag(dist_eucl_5) <- 0
+
+## We implement the network
+psn_network_5 <- graph.adjacency(dist_eucl_5,
+                                 mode = "undirected",
+                                 weighted = TRUE)
+```
+
+```{r}
+## Plot Heatmap
+heatmap.2(dist_eucl_5,
+          main = "Heatmap using Euclidean Distance (5% Hubs)",
+          margins = c(10, 10))
+```
+
+```{r}
+## Louvian Algorithm for Community Detection
+lc_community_5 <- cluster_louvain(psn_network_5)
+## We can see the communities
+message("Communities:")
+communities(lc_community_5)
+
+## Create new attributes
+V(psn_network_5)$community <- lc_community_5$membership
+rain <- c("red", "blue", "green")
+V(psn_network_5)$color <- rain[V(psn_network_5)$community]
+## Set edges colors
+E(psn_network_5)$color <- apply(as.data.frame(
+  get.edgelist(psn_network_5)), 1, 
+                              function(x) ifelse((V(psn_network_5)$community[which(lc_community_5$names == x[1])] ==
+                                                    V(psn_network_5)$community[which(lc_community_5$names == x[2])]),
+                                                 rain[V(psn_network_5)$community[which(lc_community_5$names == x[1])]],
+                                                 "grey"))
+```
+
+```{r}
+## Plot
+plot(psn_network_5, vertex.size = 4,
+     vertex.label = NA, edge.color = E(psn_network_5)$color,
+     main = "Patient Similarity Network using Euclidean Distance (5% Hubs)")
+```
+
+```{r}
+## Check Patients
+community_01_05 <- communities(lc_community_5)$"1"
+community_02_05 <- communities(lc_community_5)$"2"
+
+## Save lists
+writeLines(community_01_05, "community_01_05.txt")
+writeLines(community_02_05, "community_02_05.txt")
+```
+
+
+
+
+
+### Patient Similarity Network using only the 10% most connected hubs for differential co-expression network
+```{r}
+## PSN
+dist_eucl_10 <- as.matrix(1 / (1+dist(t(df_hubs_10),
+                                      method = "euclidean")))
+## Set to 0 the diagonal of the matrix
+diag(dist_eucl_10) <- 0
+
+## We implement the network
+psn_network_10 <- graph.adjacency(dist_eucl_10,
+                                  mode = "undirected",
+                                  weighted = TRUE)
+```
+
+```{r}
+## Plot Heatmap
+heatmap.2(dist_eucl_10,
+          main = "Heatmap using Euclidean Distance (10% Hubs)",
+          margins = c(10, 10))
+```
+
+```{r}
+## Louvian Algorithm for Community Detection
+lc_community_10 <- cluster_louvain(psn_network_10)
+## We can see the communities
+message("Communities:")
+communities(lc_community_10)
+
+## Create new attributes
+V(psn_network_10)$community <- lc_community_10$membership
+rain <- c("red", "blue", "green")
+V(psn_network_10)$color <- rain[V(psn_network_10)$community]
+## Set edges colors
+E(psn_network_10)$color <- apply(as.data.frame(
+  get.edgelist(psn_network_10)), 1, 
+                              function(x) ifelse((V(psn_network_10)$community[which(lc_community_10$names == x[1])] ==
+                                                    V(psn_network_10)$community[which(lc_community_10$names == x[2])]),
+                                                 rain[V(psn_network_10)$community[which(lc_community_10$names == x[1])]],
+                                                 "grey"))
+```
+
+```{r}
+## Plot
+plot(psn_network_10, vertex.size = 4,
+     vertex.label = NA, edge.color = E(psn_network_10)$color,
+     main = "Patient Similarity Network using Euclidean Distance (10% Hubs)")
+```
+
+```{r}
+## Check Patients
+community_01_10 <- communities(lc_community_10)$"1"
+community_02_10 <- communities(lc_community_10)$"2"
+community_03_10 <- communities(lc_community_10)$"3"
+
+## Save lists
+writeLines(community_01_10, "community_01_10.txt")
+writeLines(community_02_10, "community_02_10.txt")
+writeLines(community_03_10, "community_03_10.txt")
+```
+
+

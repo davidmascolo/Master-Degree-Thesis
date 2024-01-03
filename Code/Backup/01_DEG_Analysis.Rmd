@@ -1,0 +1,455 @@
+---
+title: "DEG Analysis"
+author: "Davide Mascolo"
+date: "2023-05-26"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Utils and Setup
+```{r}
+## Load directory 
+source_data_path <- getwd()
+
+set.seed(123)
+library(fgsea)
+library(biomaRt)
+library(edgeR)
+library(DESeq2)
+library(parallel)
+```
+
+## Load Data
+```{r}
+## Load the genes that are in the .gmt file (Gene Matrix Transposed)
+hallmark_pathways <- gmtPathways(paste0(source_data_path,
+                                        "/h.all.v2022.1.Hs.entrez.gmt"))
+names(hallmark_pathways) <- gsub("HALLMARK_", "", names(hallmark_pathways))
+## Connect to the database
+ensembl <- useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+```
+
+### Data Quality
+Let's check what is the distribution of gene median TPMs in high-quality samples
+```{r}
+## Consider only the training samples
+## Compute the median value for each row
+gene_median_log2tpm <- apply(training_rna_log2tpm_mat, 1, median)
+## Organize into dataframe
+gene_median_log2tpm_df <- data.frame(
+  median_log2tpm = gene_median_log2tpm, 
+  ensembl_gene_id_version = rownames(training_rna_log2tpm_mat)
+)
+## Save names
+names_gene <- gene_median_log2tpm_df$ensembl_gene_id_version
+write.csv(data.frame(names_gene), file = "names_gene.csv", row.names = F)
+## Check
+length(names_gene)
+```
+
+```{r}
+## In what percent of samples are genes expressed above certain threshold?
+## Set threshold
+log2tpm_threshold <- 0.5
+## Define a function that returns the percentage of gene greater than t
+percent_above_tpm <- function(gene_vector)
+  {return((sum(gene_vector > log2tpm_threshold))/length(gene_vector))}
+## Define a function that cut the distribution
+get_percent_cat <- function(percent){
+  if(percent < 0.15){
+    return("less than 15%")
+  } else if(percent < 0.3){
+    return("15-30%")
+  } else if(percent < 0.5){
+    return("30-50%")
+  } else if(percent < 0.8){
+    return("50-80%")
+  } else {
+    return("80-100%")
+  }
+}
+```
+
+```{r}
+## Apply and organize the output in a dataframe
+gene_expression_percentiles <- apply(training_rna_log2tpm_mat,
+                                     1, percent_above_tpm)
+gene_expression_percentiles_df <- data.frame(
+  ensembl_gene_id_version = rownames(training_rna_log2tpm_mat),
+  gexp_gt1_percent = gene_expression_percentiles
+)
+gene_expression_percentiles_df$gexp_gt1_cat <- as.character(unlist(
+  lapply(gene_expression_percentiles_df$gexp_gt1_percent, get_percent_cat)))
+
+## Compile info in one df
+gene_median_log2tpm_df <- left_join(gene_median_log2tpm_df,
+                                    gene_expression_percentiles_df)
+gene_median_log2tpm_df$gexp_gt1_cat <- factor(gene_median_log2tpm_df$gexp_gt1_cat,
+                                  levels =
+                        c("less than 15%","15-30%","30-50%","50-80%","80-100%"))
+```
+At the end, we have a dataframe that contains:
+- for each row: gene
+- for each columns: {Log Median TPM, ID Gene, Percentage Above TPM, Class}
+
+We use this information to filter the data. In particular to filter out genes that are all 0's or have 0 variance, or are expressed above 0.5 in less than 30% samples.
+```{r}
+## Take the genes which sum is different to 0
+zero_sum_filter <- apply(rna_counts_mat[,
+                            colnames(training_rna_log2tpm_mat)], 1, sum) != 0
+## The same for the variance
+zero_var_filter <- apply(rna_counts_mat[,
+                            colnames(training_rna_log2tpm_mat)], 1, var) != 0
+## Filters
+pc_filter <- rownames(rna_counts_mat) %in%
+  gene_names$ensembl_gene_id_version[gene_names$gene_biotype == "protein_coding"]
+gexp_filter <- rownames(rna_counts_mat) %in% 
+  gene_median_log2tpm_df$ensembl_gene_id_version[
+    gene_median_log2tpm_df$gexp_gt1_cat %in% c("30-50%","50-80%","80-100%")]
+
+## Select all names that will be excluded
+zero_sum_filter_id <- gene_median_log2tpm_df$ensembl_gene_id_version[zero_sum_filter == T]
+zero_var_filter_id <- gene_median_log2tpm_df$ensembl_gene_id_version[zero_var_filter == T]
+pc_filter_id   <- gene_median_log2tpm_df$ensembl_gene_id_version[pc_filter == T]
+gexp_filter_id <- gene_median_log2tpm_df$ensembl_gene_id_version[gexp_filter == T]
+## Collect in a single vector only the common names
+general_id <- intersect(intersect(intersect(zero_sum_filter_id,
+                                            zero_var_filter_id),
+                                  pc_filter_id),
+                        gexp_filter_id)
+```
+
+```{r}
+## All samples that pass filters
+su2c_all_cts_filtered <- rna_counts_mat[zero_sum_filter
+                                  & zero_var_filter & gexp_filter & pc_filter,]
+## Set row names
+rownames(su2c_all_cts_filtered) <- general_id
+
+## This is the matrix that will be used for further analysis
+write.csv(su2c_all_cts_filtered, row.names = FALSE,
+          paste0(source_data_path,
+                 "/rna_counts_filtered_152.csv"))
+```
+
+Now, consider the **BOR** information, we exclude samples with missing best overall response (BOR).
+```{r}
+## Define a function that filters the BOR information
+## PR: Partial Response
+## CR: Complete Response
+## PD: Progressive Disease
+## SD: Stable Disease
+get_BOR_cat <- function(BOR){
+  if(is.na(BOR)){
+    return(NA)
+  } else if(BOR == "PR" | BOR == "CR"){
+    return("response")
+  } else if(BOR == "PD" | BOR == "SD"){
+    return("resistance")
+  }
+  return(NA)
+}
+```
+
+Load a list of genes that might be of interest, to highlight in volcano plot
+```{r}
+## * Lung epithelial subtypes from [Laughney et al.2020](https://pubmed.ncbi.nlm.nih.gov/32042191/)
+## * Developmental lineage from [Tata et al. 2018](https://pubmed.ncbi.nlm.nih.gov/29587142/)
+## * CoCA subtype markers from [Chen et al. 2017](https://pubmed.ncbi.nlm.nih.gov/27775076/)
+
+## Load
+lung_epithelial_subtypes <- data.frame(
+  hgnc_symbol = c("SOX17", "HHEX", "KRT5", "VIM", "SNAI2", 
+                  "BMP4", "DKK1", "SOX2", "FGFR2", "FOXA2", "NKX2-1",
+                  "WNT7B", "SOX9", "TM4SF1"),
+  subtype = c(rep("type I-P", 3), rep("type I-Q", 2), 
+              rep("type II", 6), rep("type III", 3))) %>% 
+  left_join(gene_names[,c("hgnc_symbol", "ensembl_gene_id_version")])
+## Load
+lung_lineage_markers <- data.frame(
+  hgnc_symbol  = c("TP63", "KRT5", "KRT1", "KRT14", "DSG3", "KRT6C", "KRT6A",
+                   "KRT6B", "PAX9", "SOX2",
+                   "NKX2-1", "SFTA3", "LMO3", "NAPSA", "SFTPC", "FOXA2", "HNF1B", 
+                   "KRT7", "FGA", "PRSS1", "CDX2", "MUC2", "PDX1", "TFF2", "MUC6",
+                   "REG4", "TFF1", "HNF4A", "F2", "CPS1"),
+  lineage = c(rep("Esophagus",10), rep("Lung",7), rep("Midgut/Hindgut",13)),
+  histology = c(rep("Squamous",10), rep("Adeno",7), rep("Mucinous Adeno",13)))
+
+## Define a function that takes in input a csv file and reade only the
+## columns that are defined in cols_to_select
+read.only.cols <- function(file_path, skipped_lines, cols_to_select){
+  "Parameters of read.csv:
+     nrows = 1, read only the first row
+     skip = skipped_lines, how many rows to jump
+     colClasses= character, format as string
+     check.name = False, don't modify the name of columns
+     stringsAsFactors = False, don't convert strings to factors
+  "
+  col_classes <- read.csv(file_path, header = FALSE,
+                          nrows = 1, skip = skipped_lines,
+                          colClasses = "character", check.names = FALSE,
+                          stringsAsFactors = FALSE)[1,] %in% cols_to_select
+  ## True  ---> NA
+  ## False ---> NULL
+  col_classes[col_classes == TRUE]  <- NA
+  col_classes[col_classes == FALSE] <- "NULL"
+  ## Read again the whole file and return dataframe
+  file_df <- read.csv(
+    file_path, header = TRUE, skip = skipped_lines,
+    colClasses = col_classes, check.names = FALSE, stringsAsFactors = FALSE)
+  return(file_df)
+}
+```
+
+```{r}
+## Apply
+coca_subtypes_markers <-read.only.cols(
+  paste0(source_data_path, "/Chen_et_al_2017_histology700markers.csv"),
+  1, c("Gene", "Entrez ID")) %>% plyr::rename(c("Entrez ID" = "entrezgene"))
+```
+
+```{r}
+## Define a function that returns the first element of a string
+get.split.first.element <- function(vec, spl){
+  return(strsplit(vec,spl)[[1]][1])
+}
+```
+
+```{r}
+## Apply
+coca_subtypes_markers$hgnc_symbol <-
+  as.character(unlist(mcmapply(get.split.first.element,
+                               coca_subtypes_markers$Gene, "\\|")))
+coca_subtypes_markers <- dplyr::select(coca_subtypes_markers, -Gene) 
+```
+
+## DEG Analysis - Preparation
+```{r}
+## Consider the Clinical dataset and select only some features
+BOR_samples_metadata <- rna_master_annotations_df[
+  ,c("Harmonized_SU2C_RNA_Tumor_Sample_ID_v2",
+     "Harmonized_Confirmed_BOR", "Histology_Harmonized",
+     "Agent_PD1_Category", "Patient_Age_at_Diagnosis",
+     "Patient_Sex", "PDL1_TPS",
+     "Patient_Smoking_Pack_Years_Harmonized")] %>%
+  mutate(BOR_cat = as.character(unlist(lapply(Harmonized_Confirmed_BOR,
+                                              get_BOR_cat)))) %>% 
+  subset(Harmonized_SU2C_RNA_Tumor_Sample_ID_v2 %in%
+           colnames(rna_log2tpm_mat))
+## BOR_samples_metadata is master_annotations_df_hq in
+## 03_Preparation_RNA_Analysis.ipynb
+
+## Select metadata
+BOR_samples_metadata.origALL <- BOR_samples_metadata
+BOR_samples_metadata <-
+  BOR_samples_metadata[!is.na(BOR_samples_metadata$BOR_cat),]
+## Select filter
+BOR_samples <- as.character(BOR_samples_metadata$Harmonized_SU2C_RNA_Tumor_Sample_ID_v2[!is.na(BOR_samples_metadata$BOR_cat)])
+## Save names
+names_to_add_normalization <- rownames(su2c_all_cts_filtered)
+BOR_samples_cts <- su2c_all_cts_filtered[,BOR_samples]
+rownames(BOR_samples_cts) <- names_to_add_normalization
+
+## Save
+write.csv(BOR_samples_cts, row.names = FALSE,
+          paste0(source_data_path,
+                 "/rna_counts_final_136.csv"))
+## Bor_samples_cts is the final dataset that will be used fro DEG Analysis.
+## We move this data on google drive in order to divide it in two different datasets that will be the input of network analysis.
+```
+
+## Analysis
+```{r}
+## Design matrix for differential expression using BOR 
+BOR_samples_metadata$BOR_cat <- factor(BOR_samples_metadata$BOR_cat,
+                                       levels = c("resistance","response"))
+BOR_samples_metadata <-
+  BOR_samples_metadata[!is.na(BOR_samples_metadata$BOR_cat),]
+bor_design <- model.matrix(~BOR_cat, data = BOR_samples_metadata)
+```
+
+At this point, we have the filtered genes (BOR_samples_cts) and the raw one (rna_counts_mat).
+```{r}
+## Create a DGE object
+dge_bor <- DGEList(counts = BOR_samples_cts)
+## Check
+dim(dge_bor)
+## View
+View(head(dge_bor$counts))
+```
+## Compute Counts per Million (CPM) and Normalize the data
+```{r}
+## CPM
+cpm  <- cpm(dge_bor)
+## Log CPM
+lcpm <- cpm(dge_bor, log = T)
+## Add index
+rownames(cpm)  <- names_to_add_normalization
+rownames(lcpm) <- names_to_add_normalization
+## Save CPM
+write.csv(cpm, row.names = T,
+          paste0(source_data_path,
+                 "/cpm.csv"))
+## Save log CPM
+write.csv(lcpm, row.names = T,
+          paste0(source_data_path,
+                 "/log_cpm.csv"))
+
+## Compute some statistcs
+L <- mean(dge_bor$samples$lib.size) * 1e-6
+M <- median(dge_bor$samples$lib.size) * 1e-6
+## Check
+c(L, M)
+```
+
+## Removing genes that are lowely expressed
+```{r}
+## Count already filtered genes
+table(rowSums(dge_bor$counts == 0) == ncol(dge_bor))
+```
+As we can see, there are not genes to filter out.
+
+## Generate density plot of log-CPM values for QC
+```{r}
+## Useful parameters
+lcpm_cutoff <- log2(10/M+2/L)
+n_samples   <- ncol(dge_bor)
+
+## Plot 1
+par(mfrow   <- c(1, 2))
+plot(density(lcpm[,1]), lwd = 2, ylim = c(0,0.3), las = 2,
+     main = "", xlab = "")
+title(main = "A. Expected Count", xlab = "Log-CPM")
+abline(v = lcpm_cutoff, lty=3)
+
+for (i in 2:n_samples){
+ den = density(lcpm[,i])
+ lines(den$x, den$y, lwd = 2)
+}
+
+## Plot 2
+lcpm <- cpm(dge_bor, log = TRUE)
+plot(density(lcpm[,1]), lwd = 2, ylim = c(0,0.3), las = 2,
+     main = " ", xlab = " ")
+title(main = "B. Filtered Count", xlab = "Log-CPM")
+abline(v = lcpm_cutoff, lty=3)
+
+for (i in 2:n_samples){
+ den = density(lcpm[,i])
+ lines(den$x, den$y, lwd = 2)
+}
+```
+This plot shows the density of log-CPM values for raw pre-filtered data (A) and post-filtered data (B) for each samples. Dotted vertical line mark the log-cpm threshold (equivalent to a CPM value of about 0.2) used in the filtering step.
+The threshold is computed as follow: $$log2(10/M+2/L)$$.
+
+## Compute Scaling Factors
+```{r}
+## TMM normalization 
+dge_bor_filtered <- calcNormFactors(dge_bor, method = "TMM")
+
+## Some aspects to remember:
+## We need to create a DGElist object and calculate the normalization factors(NOTE: it does not normalize the data just calculate some factors to be used downstream)
+## Method = TMM, weighted trimmed mean of M-values (to the reference) proposed by Robinson and Oshlack (2010), where the weights are from the delta method on Binomial data.
+
+## Check desing matrix
+head(bor_design)
+```
+
+
+```{r}
+## Voom with sample quality weights
+vwts <- voomWithQualityWeights(dge_bor, design = bor_design,
+                               normalize.method = "none", plot = TRUE)
+```
+Looking the voom plot it's possible to see:
+
+1. Counts are transofrmed to log2 counts per million reads (CPM), where "per million reads" is defined based on the normalization factors we calculated earlier.
+
+2. A linear model is fitted to the log2 CPM for each gene, and the residuals are calculated.
+
+3. A smoothed curve is fitted to the sqrt(residual standard deviation) by average expression (looking to the red line)
+
+4. The smoothed curve is used to obtain weights for each gene ans sample that are passed into limma along with the log2 CPMs.
+
+```{r}
+## Fit a linear model using weighted least square for each gene
+bor_fit2 <- lmFit(vwts)
+## Perform empirical Bayes smoothing of standard errors
+bor_fit2 <- eBayes(bor_fit2)
+## Plot
+plotSA(bor_fit2, main = "Final model: Mean-variance trend")
+```
+
+## Examine the number of DEGs
+```{r}
+## Check
+summary(decideTests(bor_fit2))
+```
+```{r}
+## The number of DEGs is large. Therefore, treat is used toc ompute Empirical Bayes moderated-t p-values relative to a minimum tfc threshold of 1.
+tfit <- treat(bor_fit2, lfc = 1)
+dt   <- decideTests(tfit)
+## Check
+summary(dt)
+```
+```{r}
+## Write out the DEG data frame for downstream analyses
+DEGsTreat <- topTreat(tfit, n = Inf)
+```
+
+```{r}
+## Build table
+limma_voom_deg_all_keep_samples_bor <- topTable(bor_fit2,
+                                                coef = "BOR_catresponse",
+                                                sort = "none",
+                                                n = Inf)
+## Check
+View(limma_voom_deg_all_keep_samples_bor[1:10, 1:6])
+```
+
+```{r}
+## View
+View(rna_counts_mat)
+```
+
+```{r}
+## Extract names
+common_genes <- intersect(rownames(su2c_all_cts_filtered),
+                          gene_median_log2tpm_df$ensembl_gene_id_version)
+genes_to_add_df <- gene_names[gene_names$ensembl_gene_id_version %in% common_genes,]
+## From this df, is possible to make the join and take the hgnc_symbol
+
+## Organize into df
+limma_voom_deg_all_keep_samples_bor <- mutate(limma_voom_deg_all_keep_samples_bor,
+                  ensembl_gene_id_version = common_genes) %>% 
+  left_join(., genes_to_add_df, by = "ensembl_gene_id_version") %>% 
+  left_join(., gene_median_log2tpm_df, by = "ensembl_gene_id_version") %>% 
+  plyr::rename(c("hgnc_symbol" = "Description"))
+```
+
+```{r}
+## View
+View(head(limma_voom_deg_all_keep_samples_bor))
+```
+
+```{r}
+## Collect all the genes in a unique dataframe
+genes_to_show <- as.character(limma_voom_deg_all_keep_samples_bor$Description
+                              [limma_voom_deg_all_keep_samples_bor$Description
+                                %in% lung_epithelial_subtypes$hgnc_symbol |
+                                  limma_voom_deg_all_keep_samples_bor$Description
+                                %in% coca_subtypes_markers$hgnc_symbol |
+                                  limma_voom_deg_all_keep_samples_bor$Description
+                                %in% lung_lineage_markers$hgnc_symbol])
+## Check
+length(genes_to_show)
+```
+
+```{r}
+## Save results
+write.csv(limma_voom_deg_all_keep_samples_bor,
+          paste0(source_data_path, "/pre_SU2C_limma_out.csv"))
+```

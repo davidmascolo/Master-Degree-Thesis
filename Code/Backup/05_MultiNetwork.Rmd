@@ -1,0 +1,426 @@
+---
+title: "Multi - Network Approach"
+author: "Davide Mascolo"
+date: "2023-07-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script is used to build different PSN using several sources of data.
+
+### Import Utils
+```{r}
+## Utils
+library(vegan)
+library(igraph)
+library(gplots)
+library(centiserve)
+```
+
+### Custom Functions
+```{r}
+## Function that computes the features from the network
+features_extractor <- function(g, strength, closeness = igraph::closeness, 
+                     bonanich_centrality, closeness.currentflow,
+                     estimate_betweenness,
+                     cutoff_bet = 2/vcount(g)*(vcount(g)-1),
+                     eigen_centrality, hub_score, authority_score,
+                     page_rank, type_of_net){
+  ## Input: Graph, Metrics
+  ## Output: Dataframe
+  
+  ## Compute metrics
+  ## Weighted Degree
+  weighted_degree        <- cbind(strength(g))
+  ## Closeness 
+  closeness_centrality   <- cbind(closeness(g))
+  ## Bonacich Centrality
+  bonanich_centrality <- cbind(power_centrality(g,
+                                          exponent = -2,
+                                          rescale = T))
+  ## Current Flow Closeness
+  current_flow_closeness <- cbind(closeness.currentflow(g))
+  ## Betweenness
+  betweenness_centrality <- cbind(estimate_betweenness(g,
+                            cutoff = cutoff_bet))
+  ## Eigenvector
+  eigen_vector_centrality <- cbind(eigen_centrality(g)$vector)
+  ## Hub Score
+  hub_score               <- cbind(hub_score(g)$vector)
+  ## Authority Score
+  aut_score               <- cbind(authority_score(g)$vector)
+  ## Page Rank
+  page_rank_centrality    <- cbind(page_rank(g)$vector)
+
+  ## Organize into dataframe
+  df_metrics <- cbind(weighted_degree, closeness_centrality,
+                      bonanich_centrality, current_flow_closeness,
+                      betweenness_centrality,eigen_vector_centrality,
+                      hub_score, aut_score, page_rank_centrality)
+  
+  ## Set colnames
+  colnames(df_metrics) <- c("Weighted_Degree", "Closeness_Centrality",
+                            "Bonanich_Centrality","Current_Flow_Closeness",
+                            "Betweenness_Centrality",
+                            "Eigenvector_Centrality", "Hub_Score",
+                            "Authority_Score", "Page_Rank_Centrality")
+  ## Control
+  if (type_of_net == "wes"){
+    colnames(df_metrics) <- paste(colnames(df_metrics),
+                                  "_wes", sep = "")}
+  else{
+    colnames(df_metrics) <- paste(colnames(df_metrics),
+                                  "_rna", sep = "")}
+    
+  return(df_metrics)
+}
+```
+
+
+### PSN - WES (Exome) Data
+#### Load Data
+```{r}
+## Load Exome Data
+df_wes <- read.csv("wes_counts.csv", header = T)
+
+## Load RNA data
+## Response Group
+df_response   <- read.csv("df_response_filtered.csv",
+                          header = T)
+## Resistance Group
+df_resistance <- read.csv("df_resistance_filtered.csv",
+                          header = T)
+
+## Load list of 10% hubs
+hubs_10 <- readLines("10%_hubs_diff_coex_raw.txt")
+```
+
+#### Data Wrangling
+```{r}
+## Set index
+rownames(df_wes) <- df_wes$Tumor_Sample_Barcode
+df_wes$Tumor_Sample_Barcode <- NULL
+
+## Create complete dataset
+df_rna <- cbind(df_response, df_resistance)
+## Set index
+rownames(df_rna) <- df_rna$X
+df_rna$X <- NULL
+df_rna$X <- NULL
+
+## Subset
+df_hubs_10 <- subset(df_rna, rownames(df_rna) %in%
+                       hubs_10)
+## Check
+df_hubs_10 <- t(df_hubs_10)
+
+## Filter wes data wrt the patients that are in rna data
+## Save list of patients
+patients_list <- rownames(df_hubs_10) <- gsub("\\.", "-", rownames(df_hubs_10))
+## Filter
+df_wes_filtered <- df_wes[rownames(df_wes) %in% patients_list, ]
+```
+
+```{r}
+## Check
+message("WES data shape:")
+dim(df_wes_filtered)
+
+## Check if there are Na
+message("WES data NaN:")
+table(is.na(df_wes_filtered))
+
+## Check if there are some values that are different from 0 and 1
+message("Check if there are some values that are different from 0 and 1:")
+any(df_wes_filtered != 0 & df_wes_filtered != 1)
+
+## Check
+message("Number of 10% genes: ")
+length(hubs_10)
+```
+
+
+#### Network
+```{r}
+## Implement the network using Binary distance
+## It's possible to try also with different measures like Hamming distance
+#bin_sim <- as.matrix(1 / (1+dist(df_wes_filtered, method = "binary")))
+hamming_wes_dist <- as.matrix(1 / (1+Mercator::binaryDistance(t(df_wes_filtered), "hamming")))
+
+## Set to 0 the diagonal of the matrix
+diag(hamming_wes_dist) <- 0
+
+## We implement the network
+psn_wes <- graph.adjacency(hamming_wes_dist,
+                           mode = "undirected",
+                           weighted = TRUE)
+```
+
+```{r}
+## Plot Heatmap
+heatmap.2(hamming_wes_dist,
+          main = "Heatmap using Hamming Similarity on WES data",
+          margins = c(10, 10))
+```
+
+```{r}
+## Louvian Algorithm for Community Detection
+community_wes_louvian <- cluster_louvain(psn_wes)
+```
+
+### PSN - RNA Data
+```{r}
+## Compute Euclidean Similarity
+dist_rna <- as.matrix(1 / (1+dist(df_hubs_10, method = "maximum")))
+
+## Set to 0 the diagonal of the matrix
+diag(dist_rna) <- 0
+
+## We implement the network
+psn_rna <- graph.adjacency(dist_rna,
+                           mode = "undirected",
+                           weighted = TRUE)
+```
+
+```{r}
+## Plot Heatmap
+heatmap.2(dist_eucl_hubs_10,
+          main = "Heatmap using Maximum Similarity on RNA data, with 10% Hubs Co-Expression Network",
+          margins = c(10, 10))
+```
+
+```{r}
+## Louvian Algorithm for Community Detection
+community_rna_louvian <- cluster_louvain(psn_rna)
+```
+
+
+#### Centrality Features Extraction
+```{r}
+## From the PSNs it's possible to extract two types of features:
+## 1. centrality features
+## 2. modularity features
+
+## List of all the metrics
+## strength, closeness = igraph::closeness, bonanich_centrality, closeness.currentflow, estimate_betweenness, cutoff, eigen_centrality, hub_score, authority_score, page_rank, type_of_net
+
+
+## Apply the function to extract features
+## Features PSN WES
+df_wes_features <- features_extractor(psn_wes, strength,
+                   closeness = igraph::closeness, 
+                   bonanich_centrality, closeness.currentflow,
+                   estimate_betweenness,
+                   cutoff_bet = 2/vcount(psn_wes)*(vcount(psn_wes)-1),
+                   eigen_centrality, hub_score, authority_score,
+                   page_rank, type_of_net = "wes")
+
+## Features PSN RNA
+df_rna_features <- features_extractor(psn_rna, strength,
+                   closeness = igraph::closeness, 
+                   bonanich_centrality, closeness.currentflow,
+                   estimate_betweenness,
+                   cutoff_bet = 2/vcount(psn_rna)*(vcount(psn_rna)-1),
+                   eigen_centrality, hub_score, authority_score,
+                   page_rank, type_of_net = "rna")
+```
+
+```{r}
+## Check 
+message("df wes data shape:")
+dim(df_wes_features)
+message("df rna data shape:")
+dim(df_rna_features)
+```
+
+```{r}
+## Check
+View(df_wes_features);View(df_rna_features)
+```
+
+```{r}
+## Merge
+df_final_features_centrality <- rbind(df_wes_features, df_rna_features)
+## Set colnames
+colnames(df_final_features_centrality) <- gsub("_wes", "",
+                                    colnames(df_final_features_centrality))
+## Check
+message("df merged shape:")
+dim(df_final_features_centrality)
+```
+
+```{r}
+## Save
+write.csv(df_final_features_centrality, "df_final_centrality_wes_rna.csv")
+```
+
+
+#### Community Detection
+```{r}
+## Compute other communities for wes and rna data
+
+## WES
+## 1. Edge-Betweenness
+community_wes_betweenness <- cluster_edge_betweenness(psn_wes)
+## 2. Label-Propagation
+community_wes_propagation <- cluster_label_prop(psn_wes)
+## 3. Walktrap
+community_wes_walktrap    <- cluster_walktrap(psn_wes)
+## 4. Infomap
+community_wes_infomap     <- cluster_infomap(psn_wes)
+
+## RNA
+## 1. Edge-Betweenness
+community_rna_betweenness <- cluster_edge_betweenness(psn_rna)
+## 2. Label-Propagation
+community_rna_propagation <- cluster_label_prop(psn_rna)
+## 3. Walktrap
+community_rna_walktrap    <- cluster_walktrap(psn_rna)
+## 4. Infomap
+community_rna_infomap     <- cluster_infomap(psn_rna)
+```
+
+#### Check Modularity
+```{r}
+## Modularity WES Data
+message("Modularity WES data: ")
+message("\n")
+message("Modularity Louvian")
+modularity(community_wes_louvian)
+message("Modularity Edge-Betweenness")
+modularity(community_wes_betweenness)
+message("Modularity Label-Propagation")
+modularity(community_wes_propagation)
+message("Modularity Walktrap")
+modularity(community_wes_walktrap)
+message("Modularity Infomap")
+modularity(community_wes_infomap)
+message("\n")
+
+## Modularity RNA Data
+message("Modularity RNA data: ")
+message("\n")
+message("Modularity Louvian")
+modularity(community_rna_louvian)
+message("Modularity Edge-Betweenness")
+modularity(community_rna_betweenness)
+message("Modularity Label-Propagation")
+modularity(community_rna_propagation)
+message("Modularity Walktrap")
+modularity(community_rna_walktrap)
+message("Modularity Infomap")
+modularity(community_rna_infomap)
+```
+
+#### Check Communities
+```{r}
+## How many communities?
+
+message("Communities WES data: ")
+message("\n")
+message("Communities Louvian")
+length(unique(community_wes_louvian$membership))
+message("Communities Edge-Betweenness")
+length(unique(community_wes_betweenness$membership))
+message("Communities Label-Propagation")
+length(unique(community_wes_propagation$membership))
+message("Communities Walktrap")
+length(unique(community_wes_walktrap$membership))
+message("Communities Infomap")
+length(unique(community_wes_infomap$membership))
+message("\n")
+
+message("Communities RNA data: ")
+message("\n")
+message("Communities Louvian")
+length(unique(community_rna_louvian$membership))
+message("Communities Edge-Betweenness")
+length(unique(community_rna_betweenness$membership))
+message("Communities Label-Propagation")
+length(unique(community_rna_propagation$membership))
+message("Communities Walktrap")
+length(unique(community_rna_walktrap$membership))
+message("Communities Infomap")
+length(unique(community_rna_infomap$membership))
+```
+
+Looking these results (modularity), Louvian and Walktrap algorithms were choosen for extract modularity features.
+
+#### Extract Modularity Memberships Features
+```{r}
+## WES Data
+membership_wes_louvian  <- cbind(membership(community_wes_louvian))
+membership_wes_walktrap <- cbind(membership(community_wes_walktrap))
+## Set colnames
+df_membership_wes_features <- cbind(membership_wes_louvian,
+                                    membership_wes_walktrap)
+colnames(df_membership_wes_features) <- c("Louvian_wes",
+                                          "Walktrap_wes")
+
+  
+## RNA Data
+membership_rna_louvian  <- cbind(membership(community_rna_louvian))
+membership_rna_walktrap <- cbind(membership(community_rna_walktrap))
+## Set colnames
+df_membership_rna_features <- cbind(membership_rna_louvian,
+                                    membership_rna_walktrap)
+colnames(df_membership_rna_features) <- c("Louvian_rna",
+                                          "Walktrap_rna")
+```
+
+```{r}
+## Check
+message("WES Modularity Shape:")
+dim(df_membership_wes_features)
+message("RNA Modularity Shape:")
+dim(df_membership_rna_features)
+
+## Combine
+df_final_features_modularity <- rbind(df_membership_wes_features,
+                                      df_membership_rna_features)
+colnames(df_final_features_modularity) <- c("Louvian",
+                                            "Walktrap")
+## Convert to df
+df_final_features_modularity <- as.data.frame(df_final_features_modularity)
+rownames(df_final_features_modularity) <- gsub("\\.",
+                      "-", rownames(df_final_features_modularity))
+  
+## Check
+message("df merged shape:")
+dim(df_final_features_modularity)
+```
+```{r}
+## The final step is merge the two dataframe and use the final as input for the classifier
+message("df centrality shape:")
+dim(df_final_features_centrality)
+
+message("df modularity shape:")
+dim(df_final_features_modularity)
+
+
+## Save
+write.csv(df_final_features_modularity, "df_final_modularity_wes_rna.csv")
+```
+
+```{r}
+## Join
+df_final_wes_rna <- df_final_features_centrality
+df_final_wes_rna <- as.data.frame(df_final_wes_rna)          
+df_final_wes_rna$Louvian  <- df_final_features_modularity$Louvian
+df_final_wes_rna$Walktrap <- df_final_features_modularity$Walktrap
+
+## Set rownames
+rownames(df_final_wes_rna) <- gsub("\\.",
+                      "-", rownames(df_final_wes_rna))
+
+## Chedk
+message("df final shape:")
+dim(df_final_wes_rna)
+
+
+## Save
+write.csv(df_final_wes_rna, "df_final_wes_rna.csv")
+```
